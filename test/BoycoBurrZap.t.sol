@@ -8,19 +8,13 @@ import {IERC20} from "@balancer-labs/v2-interfaces/contracts/solidity-utils/open
 import {Math} from "@balancer-labs/v2-solidity-utils/contracts/math/Math.sol";
 
 contract BoycoBurrZapTest is Test {
-    uint256 constant ONEe18 = 1e18;
     // cArtio environment
     address constant VAULT = 0x398D4CFB5D29d18BaA149497656904F2e8814EFb;
-    address constant BAL_QUERIES = 0x4475Ba7AfdCfC0ED90772843A106b2C77395f19C;
     address constant NECT_USDC_HONEY_POOL = 0xFbb99BAD8eca0736A9ab2a7f566dEbC9acb607f0;
     address constant USDC = 0x015fd589F4f1A33ce4487E12714e1B15129c9329;
     address constant HONEY_FACTORY = 0xA81F0019d442f19f66880bcf2698B4E5D5Ec249A;
 
     // ---- BeraBorrow related addresses ----
-    address constant COLL_VAULT_ROUTER = 0x2771E67832a248b123cAa115E6F74e8cB91089f7;
-    address constant DEN_MANAGER = 0x905e4821AE8c60e5E60df836Ababf738E920e7F5;
-    address constant USDC_VAULT_PROXY = 0x760dba930a2255F496EC7Fc18f1dC35Df9d2e7Fc;
-
     address constant NECT = 0xefEeD4d987F6d1dE0f23D116a578402456819C28;
 
     address constant PSM_WHITELISTED = 0xBa8F5f80C41BF5e169d9149Cd4977B1990Fc2736;
@@ -41,14 +35,14 @@ contract BoycoBurrZapTest is Test {
         deal(USDC, bob, 2 ** 111);
         _etchContract(PSM_WHITELISTED);
         zap = BoycoBurrZap(PSM_WHITELISTED);
-        zap.addWhitelisted(address(this));
+        zap.whitelist(address(this));
     }
 
     function test_whitelisted() public {
         assertEq(zap.whitelisted(bob), false, "Should not be whitelisted");
-        zap.addWhitelisted(bob);
+        zap.whitelist(bob);
         assertEq(zap.whitelisted(bob), true, "Should be whitelisted");
-        zap.removeWhitelisted(bob);
+        zap.revoke(bob);
         assertEq(zap.whitelisted(bob), false, "Should not be whitelisted");
 
         vm.startPrank(bob);
@@ -57,7 +51,7 @@ contract BoycoBurrZapTest is Test {
         zap.deposit(1e18, address(this));
 
         vm.expectRevert("BAL#426");
-        zap.addWhitelisted(bob);
+        zap.whitelist(bob);
 
         vm.stopPrank();
     }
@@ -83,7 +77,7 @@ contract BoycoBurrZapTest is Test {
         );
     }
 
-    function _ensureRatiosWithinTolerance(uint256[] memory _ratiosPre, uint256[] memory _ratiosPost) internal view {
+    function _ensureRatiosWithinTolerance(uint256[] memory _ratiosPre, uint256[] memory _ratiosPost) internal pure {
         for (uint256 i = 0; i < _ratiosPre.length; i++) {
             uint256 ratioDiff = Math.abs(int256(RATIO_PRECISION - ((_ratiosPre[i] * RATIO_PRECISION) / _ratiosPost[i])));
             assertLt(ratioDiff, 10, "Ratio should be within 0.001%");

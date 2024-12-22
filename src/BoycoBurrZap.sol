@@ -43,6 +43,10 @@ contract BoycoBurrZap is Ownable {
         uint256 depositAmount;
     }
 
+    event Deposit(address indexed sender, uint256 amount, address indexed recipient);
+    event Whitelisted(address indexed whitelisted);
+    event Revoked(address indexed revoked);
+
     /**
      * @notice Initializes the BoycoBurrZap contract
      * @param _token Token to deposit (e.g. USDC)
@@ -92,12 +96,14 @@ contract BoycoBurrZap is Ownable {
     /////////////////////////
     /////// ADMIN ///////////
     /////////////////////////
-    function addWhitelisted(address _whitelisted) public onlyOwner {
-        whitelisted[_whitelisted] = true;
+    function whitelist(address _addy) public onlyOwner {
+        whitelisted[_addy] = true;
+        emit Whitelisted(_addy);
     }
 
-    function removeWhitelisted(address _whitelisted) public onlyOwner {
-        whitelisted[_whitelisted] = false;
+    function revoke(address _addy) public onlyOwner {
+        whitelisted[_addy] = false;
+        emit Revoked(_addy);
     }
 
     /////////////////////////
@@ -131,6 +137,7 @@ contract BoycoBurrZap is Ownable {
         );
         // Execute join pool transaction
         _joinPool(poolId, tokens, amountsIn, bptIndex, _recipient);
+        emit Deposit(msg.sender, _depositAmount, _recipient);
     }
 
     /////////////////////////
