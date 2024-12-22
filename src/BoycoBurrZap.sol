@@ -6,7 +6,6 @@ import {IVault} from "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
 import {IAsset} from "@balancer-labs/v2-interfaces/contracts/vault/IAsset.sol";
 import {IERC20} from "@balancer-labs/v2-interfaces/contracts/solidity-utils/openzeppelin/IERC20.sol";
 import {_upscale, _downscaleDown} from "@balancer-labs/v2-solidity-utils/contracts/helpers/ScalingHelpers.sol";
-import {IBalancerQueries} from "@balancer-labs/v2-interfaces/contracts/standalone-utils/IBalancerQueries.sol";
 import {StablePoolUserData} from "@balancer-labs/v2-interfaces/contracts/pool-stable/StablePoolUserData.sol";
 import {Ownable} from "@balancer-labs/v2-solidity-utils/contracts/openzeppelin/Ownable.sol";
 
@@ -44,11 +43,11 @@ contract BoycoBurrZap is Ownable {
     }
 
     constructor(
-        address _token,
-        address _pool,
-        address _honeyFactory,
-        address _nect,
-        address _pBondProxy
+        address _token, // token to deposit (e.g. USDC)
+        address _pool, // pool to deposit into (e.g. NECT_USDC_HONEY_POOL)
+        address _honeyFactory, // honey factory to mint honey
+        address _nect, // nectar token address
+        address _pBondProxy // beraborrow's psm bond proxy address to deposit and mint NECT from
     ) Ownable() {
         require(_token != address(0), ERROR_INVALID_RECIPIENT);
         require(_pool != address(0), ERROR_INVALID_RECIPIENT);
@@ -90,6 +89,20 @@ contract BoycoBurrZap is Ownable {
         IERC20(_honey).approve(_vault, type(uint256).max);
     }
 
+    /////////////////////////
+    /////// ADMIN ///////////
+    /////////////////////////
+    function addWhitelisted(address _whitelisted) public onlyOwner {
+        whitelisted[_whitelisted] = true;
+    }
+
+    function removeWhitelisted(address _whitelisted) public onlyOwner {
+        whitelisted[_whitelisted] = false;
+    }
+
+    /////////////////////////
+    /////// WHITELISTED /////
+    /////////////////////////
     /// @notice Deposits tokens and mints LP tokens
     /// @param _depositAmount Amount of tokens to deposit
     /// @param _recipient Address to receive LP tokens
@@ -129,6 +142,9 @@ contract BoycoBurrZap is Ownable {
         _joinPool(poolId, tokens, amountsIn, bptIndex, _recipient);
     }
 
+    /////////////////////////
+    /////// HELPERS /////////
+    /////////////////////////
     /// @dev Calculates the amounts needed for pool join
     function _mintAmounts(
         MintParams memory params
@@ -192,14 +208,6 @@ contract BoycoBurrZap is Ownable {
         // of all token in the request and there is no dust left
         // therefore we avoid having to transfer dust back to the user
         amountsIn[tokenIndex] = IERC20(TOKEN).balanceOf(address(this));
-    }
-
-    function addWhitelisted(address _whitelisted) public onlyOwner {
-        whitelisted[_whitelisted] = true;
-    }
-
-    function removeWhitelisted(address _whitelisted) public onlyOwner {
-        whitelisted[_whitelisted] = false;
     }
 
     /// @dev Helper function to get normalized balances
@@ -325,98 +333,9 @@ interface IHoneyFactory {
     ) external returns (uint256);
 }
 
-interface IDenManager {}
-interface IInfraredCollateralVault {}
-
 interface IPSMBondProxy {
     function deposit(
         uint256 amount,
         address receiver
     ) external returns (uint256);
-}
-
-interface ICollVaultRouter {
-    struct AdjustDenVaultParams {
-        IDenManager denManager;
-        IInfraredCollateralVault collVault;
-        uint256 _maxFeePercentage;
-        uint256 _collAssetToDeposit;
-        uint256 _collWithdrawal;
-        uint256 _debtChange;
-        bool _isDebtIncrease;
-        address _upperHint;
-        address _lowerHint;
-        bool unwrap;
-        uint256 _minSharesMinted;
-        uint256 _minAssetsWithdrawn;
-        uint256 _collIndex;
-        bytes _preDeposit;
-    }
-
-    struct DepositFromAnyParams {
-        IInfraredCollateralVault collVault;
-        address inputToken;
-        uint256 inputAmount;
-        uint256 minSharesMinted;
-        uint256 outputMin;
-        address outputReceiver;
-        bytes dexCalldata;
-    }
-
-    struct OpenDenVaultParams {
-        IDenManager denManager;
-        IInfraredCollateralVault collVault;
-        uint256 _maxFeePercentage;
-        uint256 _debtAmount;
-        uint256 _collAssetToDeposit;
-        address _upperHint;
-        address _lowerHint;
-        uint256 _minSharesMinted;
-        uint256 _collIndex;
-        bytes _preDeposit;
-    }
-
-    struct RedeemToOneParams {
-        uint256 shares;
-        address owner;
-        address receiver;
-        IInfraredCollateralVault collVault;
-        address targetToken;
-        uint256 minTargetTokenAmount;
-        uint256[] outputQuotes;
-        uint256[] outputMins;
-        bytes[] pathDefinitions;
-        address executor;
-        uint32 referralCode;
-    }
-
-    function adjustDenVault(
-        AdjustDenVaultParams calldata params
-    ) external payable;
-
-    function claimLockedTokens(
-        IERC20[] calldata tokens,
-        uint256[] calldata amounts
-    ) external;
-
-    function closeDenVault(
-        IDenManager denManager,
-        IInfraredCollateralVault collVault,
-        uint256 minAssetsWithdrawn,
-        uint256 collIndex,
-        bool unwrap
-    ) external;
-
-    function depositFromAny(
-        DepositFromAnyParams calldata params
-    ) external payable returns (uint256 shares);
-
-    function openDenVault(OpenDenVaultParams calldata params) external payable;
-
-    function previewRedeemUnderlying(
-        IInfraredCollateralVault collVault,
-        uint256 shares
-    ) external view returns (address[] memory tokens, uint256[] memory amounts);
-
-    function redeemToOne(RedeemToOneParams calldata params) external;
 }
