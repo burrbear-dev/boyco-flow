@@ -27,8 +27,8 @@ struct BalancesParams {
 
 contract BoycoBurrZap {
     address public immutable TOKEN;
+    address public immutable POOL;
     address public immutable VAULT;
-    address public immutable BAL_QUERIES;
     address public immutable HONEY_FACTORY;
     address public immutable HONEY;
     // Beraborrow related
@@ -36,15 +36,15 @@ contract BoycoBurrZap {
     address public immutable NECT;
     constructor(
         address _token,
-        address _vault,
-        address _balQueries,
+        address _pool,
         address _honeyFactory,
         address _nect,
         address _pBondProxy
     ) {
         TOKEN = _token;
+        POOL = _pool;
+        address _vault = IComposableStablePool(_pool).getVault();
         VAULT = _vault;
-        BAL_QUERIES = _balQueries;
         address _honey = IHoneyFactory(_honeyFactory).honey();
         HONEY = _honey;
         HONEY_FACTORY = _honeyFactory;
@@ -52,9 +52,7 @@ contract BoycoBurrZap {
         PSM_BOND_PROXY = _pBondProxy;
 
         IERC20(_token).approve(_pBondProxy, type(uint256).max);
-        // @TODO this might not be needed
-        IERC20(_nect).approve(_pBondProxy, type(uint256).max);
-        // at deployment time of this contract _token might not
+        // NB: at deployment time of this contract _token might not
         // have been added to the honey factory list of supported tokens
         IERC20(_token).approve(_honeyFactory, type(uint256).max);
         // vault approvals
@@ -156,17 +154,17 @@ contract BoycoBurrZap {
     // @TODO add Owner and whitelist
     // since no one else should be able to mint NECT at 100% LTV
     // @TODO add receiver address
-    function deposit(
-        uint256 _depositAmount,
-        address _pool,
-        address _recipient
-    ) public {
+    function deposit(uint256 _depositAmount, address _recipient) public {
+        require(_recipient != address(0), "Invalid recipient");
+        require(_recipient != address(this), "Invalid recipient");
+        require(_recipient != address(POOL), "Invalid recipient");
+        require(_depositAmount > 0, "Invalid deposit amount");
         IERC20(TOKEN).transferFrom(msg.sender, address(this), _depositAmount);
 
         BalancesParams memory params = _getBalancesNormalized(
             TOKEN,
             _depositAmount,
-            _pool
+            POOL
         );
 
         console2.log("amountsToConvert[0]", params.amountsToConvert[0]);
@@ -197,13 +195,7 @@ contract BoycoBurrZap {
 
         console2.log("BAL USDC\t", amountsIn[params.tokenIndex]);
 
-        _joinPool(_pool, amountsIn, _recipient);
-
-        // @TODO return _token leftovers to msg.sender
-        // console2.log("normBalsNoBpt[0]", params.normBalsNoBpt[0]);
-        // console2.log("normBalsNoBpt[1]", params.normBalsNoBpt[1]);
-        // console2.log("normBalsNoBpt[2]", params.normBalsNoBpt[2]);
-        // console2.log("normTotalBal", params.normTotalBal);
+        _joinPool(POOL, amountsIn, _recipient);
     }
 
     function _mintNect(
@@ -211,18 +203,6 @@ contract BoycoBurrZap {
         uint256 _amount
     ) private returns (uint256) {
         return IPSMBondProxy(PSM_BOND_PROXY).deposit(_amount, address(this));
-    }
-
-    function _getVaultTokenIndex(
-        address _token,
-        IERC20[] memory tokens
-    ) private view returns (uint256) {
-        for (uint256 i = 0; i < tokens.length; i++) {
-            if (address(tokens[i]) == _token) {
-                return i;
-            }
-        }
-        revert("Token not found in pool");
     }
 
     function _joinPool(
@@ -237,7 +217,6 @@ contract BoycoBurrZap {
         // maxAmountsIn length is +1 bc of the bpt token
         uint256[] memory maxAmountsIn = new uint256[](_amountsIn.length);
         for (uint256 i = 0; i < _amountsIn.length; i++) {
-            console2.log("_amountsIn[i]", _amountsIn[i]);
             maxAmountsIn[i] = type(uint256).max;
         }
 
@@ -256,52 +235,6 @@ contract BoycoBurrZap {
                 fromInternalBalance: false
             })
         );
-    }
-
-    function _queryJoin(
-        address _pool,
-        address _token,
-        uint256 _tokenAmount
-    ) private {
-        bytes32 poolId = IComposableStablePool(_pool).getPoolId();
-        (IERC20[] memory tokens, uint256[] memory balances, ) = IVault(VAULT)
-            .getPoolTokens(poolId);
-        uint256 tokenIndex = _getVaultTokenIndex(_token, tokens);
-        uint256 tokenBalance = balances[tokenIndex];
-        uint256 totalSupply = IComposableStablePool(_pool).getActualSupply();
-        uint256 expectedBptOut = (_tokenAmount * totalSupply) /
-            1e18 /
-            tokenBalance;
-        console2.log("_tokenAmount", _tokenAmount);
-        console2.log("totalSupply", totalSupply);
-        console2.log("tokenBalance", tokenBalance);
-        console2.log("expectedBptOut", expectedBptOut);
-
-        // Verify with queryJoin
-        IVault.JoinPoolRequest memory request;
-        request.assets = _asIAsset(tokens);
-        // request.maxAmountsIn = amountsIn;
-
-        request.userData = abi.encode(
-            StablePoolUserData.JoinKind.ALL_TOKENS_IN_FOR_EXACT_BPT_OUT,
-            expectedBptOut
-        );
-        // request.fromInternalBalance = false;
-
-        // Query join to verify our calculations
-        (
-            uint256 actualBptOut,
-            uint256[] memory actualAmountsIn
-        ) = IBalancerQueries(BAL_QUERIES).queryJoin(
-                poolId,
-                address(this),
-                address(this),
-                request
-            );
-        console2.log("actualBptOut", actualBptOut);
-        console2.log("actualAmountsIn[0]", actualAmountsIn[0]);
-        console2.log("actualAmountsIn[1]", actualAmountsIn[1]);
-        console2.log("actualAmountsIn[2]", actualAmountsIn[2]);
     }
 
     function _asIAsset(
@@ -351,8 +284,6 @@ contract BoycoBurrZap {
 }
 
 interface IERC20Detailed {
-    function name() external view returns (string memory);
-    function symbol() external view returns (string memory);
     function decimals() external view returns (uint8);
 }
 

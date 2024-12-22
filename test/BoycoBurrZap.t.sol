@@ -48,7 +48,7 @@ contract BoycoBurrZapTest is Test {
         uint256 usdcAmount = 60 * 1e6;
         uint256[] memory ratiosPre = _getPoolTokenRatios(NECT_USDC_HONEY_POOL);
         IERC20(USDC).approve(address(zap), usdcAmount);
-        zap.deposit(usdcAmount, NECT_USDC_HONEY_POOL, address(this));
+        zap.deposit(usdcAmount, address(this));
         _ensureNoZapBalance(zap);
         uint256 lpTokensBalance = IERC20(NECT_USDC_HONEY_POOL).balanceOf(
             address(this)
@@ -96,8 +96,7 @@ contract BoycoBurrZapTest is Test {
     function _etchContract(address _target) internal {
         zap = new BoycoBurrZap(
             USDC,
-            VAULT,
-            BAL_QUERIES,
+            NECT_USDC_HONEY_POOL,
             HONEY_FACTORY,
             NECT,
             PSM_BOND_PROXY
@@ -110,7 +109,6 @@ contract BoycoBurrZapTest is Test {
         // again for the new address
         vm.startPrank(_target);
         IERC20(USDC).approve(PSM_BOND_PROXY, type(uint256).max);
-        IERC20(NECT).approve(PSM_BOND_PROXY, type(uint256).max);
         // at deployment time of this contract USDC might not
         // have been added to the honey factory list of supported tokens
         IERC20(USDC).approve(HONEY_FACTORY, type(uint256).max);
