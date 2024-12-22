@@ -2,9 +2,6 @@
 pragma solidity ^0.7.0;
 pragma abicoder v2;
 
-import "forge-std/console2.sol";
-import "forge-std/Test.sol";
-
 import {IVault} from "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
 import {IAsset} from "@balancer-labs/v2-interfaces/contracts/vault/IAsset.sol";
 import {IERC20} from "@balancer-labs/v2-interfaces/contracts/solidity-utils/openzeppelin/IERC20.sol";
@@ -12,20 +9,19 @@ import {_upscale, _downscaleDown} from "@balancer-labs/v2-solidity-utils/contrac
 import {IBalancerQueries} from "@balancer-labs/v2-interfaces/contracts/standalone-utils/IBalancerQueries.sol";
 import {StablePoolUserData} from "@balancer-labs/v2-interfaces/contracts/pool-stable/StablePoolUserData.sol";
 
-struct BalancesParams {
-    uint256[] balsNoBpt;
-    uint256[] normBalsNoBpt;
-    uint256[] scalingFactorsNoBpt;
-    uint256[] amountsToConvert;
-    uint256[] amountsToConvertScaled;
-    uint256 normTotalBal;
-    uint256 honeyIndex;
-    uint256 tokenIndex;
-    uint256 nectIndex;
-    uint256 honeyRate;
-}
+// @TODO add Owner and whitelist
+// since no one else should be able to mint NECT at 100% LTV
+// @TODO add receiver address
 
 contract BoycoBurrZap {
+    // Constants for error messages to save gas
+    string private constant ERROR_INVALID_RECIPIENT = "Invalid recipient";
+    string private constant ERROR_INVALID_DEPOSIT = "Invalid deposit amount";
+    string private constant ERROR_TOKEN_NOT_IN_POOL = "Token not in pool";
+    string private constant ERROR_HONEY_RATE = "Invalid honey rate";
+    string private constant ERROR_DECIMALS = "Token decimals > 18";
+
+    // Immutable state variables
     address public immutable TOKEN;
     address public immutable POOL;
     address public immutable VAULT;
@@ -41,195 +37,203 @@ contract BoycoBurrZap {
         address _nect,
         address _pBondProxy
     ) {
+        require(_token != address(0), ERROR_INVALID_RECIPIENT);
+        require(_pool != address(0), ERROR_INVALID_RECIPIENT);
+        require(_honeyFactory != address(0), ERROR_INVALID_RECIPIENT);
+        require(_nect != address(0), ERROR_INVALID_RECIPIENT);
+        require(_pBondProxy != address(0), ERROR_INVALID_RECIPIENT);
+
+        address _vault = IComposableStablePool(_pool).getVault();
+        address _honey = IHoneyFactory(_honeyFactory).honey();
         TOKEN = _token;
         POOL = _pool;
-        address _vault = IComposableStablePool(_pool).getVault();
         VAULT = _vault;
-        address _honey = IHoneyFactory(_honeyFactory).honey();
         HONEY = _honey;
         HONEY_FACTORY = _honeyFactory;
         NECT = _nect;
         PSM_BOND_PROXY = _pBondProxy;
 
+        // ensure all tokens are present in the pool
+        bytes32 poolId = IComposableStablePool(_pool).getPoolId();
+        (IERC20[] memory tokens, , ) = IVault(_vault).getPoolTokens(poolId);
+        bool honeyInPool = false;
+        bool tokenInPool = false;
+        bool nectInPool = false;
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (address(tokens[i]) == _honey) honeyInPool = true;
+            else if (address(tokens[i]) == _token) tokenInPool = true;
+            else if (address(tokens[i]) == _nect) nectInPool = true;
+        }
+        require(
+            honeyInPool && tokenInPool && nectInPool,
+            "Pool must have HONEY, TOKEN, and NECT"
+        );
+
+        // Set approvals once at deployment
         IERC20(_token).approve(_pBondProxy, type(uint256).max);
-        // NB: at deployment time of this contract _token might not
-        // have been added to the honey factory list of supported tokens
         IERC20(_token).approve(_honeyFactory, type(uint256).max);
-        // vault approvals
         IERC20(_token).approve(_vault, type(uint256).max);
         IERC20(_nect).approve(_vault, type(uint256).max);
         IERC20(_honey).approve(_vault, type(uint256).max);
     }
 
-    function _getBalancesNormalized(
-        address _token,
-        uint256 _deposit,
-        address _pool
-    ) private view returns (BalancesParams memory params) {
-        uint256 len;
-        {
-            _deposit = _upscale(_deposit, _computeScalingFactor(_token));
-            bytes32 poolId = IComposableStablePool(_pool).getPoolId();
-            (IERC20[] memory tokens, uint256[] memory balances, ) = IVault(
-                VAULT
-            ).getPoolTokens(poolId);
-
-            uint256 bptIndex = IComposableStablePool(_pool).getBptIndex();
-            uint256[] memory scalingFactors = IComposableStablePool(_pool)
-                .getScalingFactors();
-            len = balances.length;
-            params.normBalsNoBpt = new uint256[](len - 1);
-            params.scalingFactorsNoBpt = new uint256[](len - 1);
-            params.normTotalBal = 0;
-            // get the USDC/USDT -> HONEY rate
-            params.honeyRate = IHoneyFactory(HONEY_FACTORY).mintRates(_token);
-            require(params.honeyRate > 0, "Honey mint rate == 0");
-            require(params.honeyRate <= 1e18, "Honey mint rate > 1e18");
-            bool honeyInPool = false;
-            bool tokenInPool = false;
-            bool nectInPool = false;
-            params.balsNoBpt = new uint256[](len - 1);
-            for (uint256 i = 0; i < len; i++) {
-                if (i == bptIndex) {
-                    continue;
-                }
-                uint256 balanceNormalized = _upscale(
-                    balances[i],
-                    scalingFactors[i]
-                );
-                console2.log("balanceNormalized", balanceNormalized);
-                params.scalingFactorsNoBpt[i] = scalingFactors[i];
-                if (address(tokens[i]) == HONEY) {
-                    honeyInPool = true;
-                    params.honeyIndex = i;
-                } else if (address(tokens[i]) == _token) {
-                    tokenInPool = true;
-                    params.tokenIndex = i;
-                } else if (address(tokens[i]) == NECT) {
-                    nectInPool = true;
-                    params.nectIndex = i;
-                }
-
-                params.normBalsNoBpt[i] = balanceNormalized;
-                params.normTotalBal += balanceNormalized;
-            }
-            require(tokenInPool, "TOKEN not in pool");
-            require(honeyInPool, "HONEY not in pool");
-            require(nectInPool, "NECT not in pool");
-        }
-
-        console2.log("normBalsNoBpt[0]", params.normBalsNoBpt[0]);
-        console2.log("normBalsNoBpt[1]", params.normBalsNoBpt[1]);
-        console2.log("normBalsNoBpt[2]", params.normBalsNoBpt[2]);
-
-        // 1 - (((numTokens - 1) + honeyRate) / numTokens)
-        // where numTokens is the number of tokens in the pool **without** the bpt token
-        uint256 rateDiff = 1e18 -
-            (((len - 2) * 1e18 + params.honeyRate) / (len - 1));
-        console2.log("rateDiff", rateDiff);
-        console2.log("honeyRate", params.honeyRate);
-
-        params.amountsToConvert = new uint256[](len - 1);
-        params.amountsToConvertScaled = new uint256[](len - 1);
-        uint256 scalingFactor = params.scalingFactorsNoBpt[params.tokenIndex];
-        for (uint256 i = 0; i < len - 1; i++) {
-            uint256 multiplier = 1e18 - rateDiff;
-            if (i == params.honeyIndex) {
-                multiplier = 1e18 + (rateDiff * (len - 2));
-            }
-            params.amountsToConvert[i] = _downscaleDown(
-                (_deposit * params.normBalsNoBpt[i] * multiplier) /
-                    params.normTotalBal /
-                    1e18,
-                scalingFactor
-            );
-            params.amountsToConvertScaled[i] =
-                (_deposit * params.normBalsNoBpt[i] * multiplier) /
-                params.normTotalBal /
-                1e18;
-        }
-        return params;
-    }
-
-    // @TODO add Owner and whitelist
-    // since no one else should be able to mint NECT at 100% LTV
-    // @TODO add receiver address
+    /// @notice Deposits tokens and mints LP tokens
+    /// @param _depositAmount Amount of tokens to deposit
+    /// @param _recipient Address to receive LP tokens
     function deposit(uint256 _depositAmount, address _recipient) public {
-        require(_recipient != address(0), "Invalid recipient");
-        require(_recipient != address(this), "Invalid recipient");
-        require(_recipient != address(POOL), "Invalid recipient");
-        require(_depositAmount > 0, "Invalid deposit amount");
+        require(
+            _recipient != address(0) &&
+                _recipient != address(this) &&
+                _recipient != POOL,
+            ERROR_INVALID_RECIPIENT
+        );
+        require(_depositAmount > 0, ERROR_INVALID_DEPOSIT);
+        // Transfer tokens from sender
         IERC20(TOKEN).transferFrom(msg.sender, address(this), _depositAmount);
 
-        BalancesParams memory params = _getBalancesNormalized(
-            TOKEN,
-            _depositAmount,
-            POOL
+        // Get pool information
+        bytes32 poolId = IComposableStablePool(POOL).getPoolId();
+        (IERC20[] memory tokens, uint256[] memory balances, ) = IVault(VAULT)
+            .getPoolTokens(poolId);
+        uint256 bptIndex = IComposableStablePool(POOL).getBptIndex();
+        uint256[] memory scalingFactors = IComposableStablePool(POOL)
+            .getScalingFactors();
+
+        // Calculate amounts and validate pool composition
+        uint256[] memory amountsIn = _mintAmounts(
+            MintParams({
+                tokens: tokens,
+                balances: balances,
+                scalingFactors: scalingFactors,
+                bptIndex: bptIndex,
+                depositAmount: _depositAmount
+            })
         );
-
-        console2.log("amountsToConvert[0]", params.amountsToConvert[0]);
-        console2.log("amountsToConvert[1]", params.amountsToConvert[1]);
-        console2.log("amountsToConvert[2]", params.amountsToConvert[2]);
-
-        uint256[] memory amountsIn = new uint256[](
-            params.amountsToConvert.length + 1
-        );
-
-        // downscale down inside the _getBalancesNormalized
-        amountsIn[params.nectIndex] = _mintNect(
-            TOKEN,
-            params.amountsToConvert[params.nectIndex]
-        );
-        console2.log("BAL NECT\t", amountsIn[params.nectIndex]);
-
-        amountsIn[params.honeyIndex] = IHoneyFactory(HONEY_FACTORY).mint(
-            TOKEN,
-            params.amountsToConvert[params.honeyIndex],
-            address(this),
-            // @TODO confirm with Berachain team about `expectBasketMode` argument
-            false
-        );
-        console2.log("BAL HONEY\t", amountsIn[params.honeyIndex]);
-
-        amountsIn[params.tokenIndex] = IERC20(TOKEN).balanceOf(address(this));
-
-        console2.log("BAL USDC\t", amountsIn[params.tokenIndex]);
-
-        _joinPool(POOL, amountsIn, _recipient);
+        // Execute join pool transaction
+        _joinPool(poolId, tokens, amountsIn, bptIndex, _recipient);
     }
 
-    function _mintNect(
-        address _token,
-        uint256 _amount
-    ) private returns (uint256) {
-        return IPSMBondProxy(PSM_BOND_PROXY).deposit(_amount, address(this));
+    struct MintParams {
+        IERC20[] tokens;
+        uint256[] balances;
+        uint256[] scalingFactors;
+        uint256 bptIndex;
+        uint256 depositAmount;
     }
 
+    /// @dev Calculates the amounts needed for pool join
+    function _mintAmounts(
+        MintParams memory params
+    ) private returns (uint256[] memory amountsIn) {
+        uint256 len = params.balances.length;
+        amountsIn = new uint256[](len);
+        // Calculate normalized balances and find token indices
+        (
+            uint256[] memory normBalances,
+            uint256 totalNormBal,
+            uint256 tokenIndex
+        ) = _getNormalizedBalancesAndTokenIndex(
+                params.tokens,
+                params.balances,
+                params.scalingFactors,
+                params.bptIndex
+            );
+
+        uint256 rateDiff;
+        {
+            // Get and validate honey rate
+            uint256 honeyRate = IHoneyFactory(HONEY_FACTORY).mintRates(TOKEN);
+            require(honeyRate > 0 && honeyRate <= 1e18, ERROR_HONEY_RATE);
+            // Calculate rate difference for proportional joins
+            rateDiff = 1e18 - (((len - 2) * 1e18 + honeyRate) / (len - 1));
+        }
+
+        uint256 scaledDeposit = _upscale(
+            params.depositAmount,
+            _computeScalingFactor(address(TOKEN))
+        );
+        // Calculate final amounts
+        for (uint256 i = 0; i < len; i++) {
+            if (i == params.bptIndex) {
+                continue;
+            }
+            uint256 multiplier = (address(params.tokens[i]) == HONEY)
+                ? 1e18 + (rateDiff * (len - 2))
+                : 1e18 - rateDiff;
+            uint256 amountIn = (scaledDeposit * normBalances[i] * multiplier) /
+                totalNormBal /
+                1e18;
+
+            if (address(params.tokens[i]) == NECT) {
+                amountsIn[i] = IPSMBondProxy(PSM_BOND_PROXY).deposit(
+                    _downscaleDown(amountIn, params.scalingFactors[tokenIndex]),
+                    address(this)
+                );
+            } else if (address(params.tokens[i]) == HONEY) {
+                amountsIn[i] = IHoneyFactory(HONEY_FACTORY).mint(
+                    TOKEN,
+                    _downscaleDown(amountIn, params.scalingFactors[tokenIndex]),
+                    address(this),
+                    false
+                );
+            }
+        }
+        // for the token amount, we just use the left over amount
+        amountsIn[tokenIndex] = IERC20(TOKEN).balanceOf(address(this));
+    }
+
+    /// @dev Helper function to get normalized balances
+    function _getNormalizedBalancesAndTokenIndex(
+        IERC20[] memory tokens,
+        uint256[] memory balances,
+        uint256[] memory scalingFactors,
+        uint256 bptIndex
+    )
+        private
+        view
+        returns (
+            uint256[] memory normBalances,
+            uint256 totalNormBal,
+            uint256 tokenIndex
+        )
+    {
+        uint256 len = balances.length;
+        normBalances = new uint256[](len);
+
+        for (uint256 i = 0; i < len; i++) {
+            if (i != bptIndex) {
+                if (address(tokens[i]) == TOKEN) {
+                    tokenIndex = i;
+                }
+                normBalances[i] = _upscale(balances[i], scalingFactors[i]);
+                totalNormBal += normBalances[i];
+            }
+        }
+    }
+
+    /// @dev Executes the pool join transaction
     function _joinPool(
-        address _pool,
-        uint256[] memory _amountsIn,
-        address _recipient
+        bytes32 poolId,
+        IERC20[] memory tokens,
+        uint256[] memory amountsIn,
+        uint256 bptIndex,
+        address recipient
     ) private {
-        bytes32 poolId = IComposableStablePool(_pool).getPoolId();
-        (IERC20[] memory tokens, , ) = IVault(VAULT).getPoolTokens(poolId);
-        uint256 bptIndex = IComposableStablePool(_pool).getBptIndex();
-
-        // maxAmountsIn length is +1 bc of the bpt token
-        uint256[] memory maxAmountsIn = new uint256[](_amountsIn.length);
-        for (uint256 i = 0; i < _amountsIn.length; i++) {
+        uint256[] memory maxAmountsIn = new uint256[](amountsIn.length);
+        for (uint256 i = 0; i < amountsIn.length; i++) {
             maxAmountsIn[i] = type(uint256).max;
         }
 
         IVault(VAULT).joinPool(
             poolId,
             address(this),
-            _recipient,
+            recipient,
             IVault.JoinPoolRequest({
                 assets: _asIAsset(tokens),
                 maxAmountsIn: maxAmountsIn,
                 userData: abi.encode(
                     StablePoolUserData.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT,
-                    _dropBptItem(_amountsIn, bptIndex),
+                    _dropBptItem(amountsIn, bptIndex),
                     0
                 ),
                 fromInternalBalance: false
@@ -252,7 +256,7 @@ contract BoycoBurrZap {
     function _dropBptItem(
         uint256[] memory amounts,
         uint256 bptIndex
-    ) internal view returns (uint256[] memory) {
+    ) internal pure returns (uint256[] memory) {
         uint256[] memory amountsWithoutBpt = new uint256[](amounts.length - 1);
         for (uint256 i = 0; i < amountsWithoutBpt.length; i++) {
             amountsWithoutBpt[i] = amounts[i < bptIndex ? i : i + 1];
@@ -276,11 +280,6 @@ contract BoycoBurrZap {
         uint256 decimalsDifference = 18 - tokenDecimals;
         return 1e18 * 10 ** decimalsDifference;
     }
-
-    // @TODO initialize the pool & deposit
-    // function initializePool() public {
-    //   console2.log("initializePool");
-    // }
 }
 
 interface IERC20Detailed {

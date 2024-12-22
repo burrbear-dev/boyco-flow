@@ -68,26 +68,26 @@ contract BoycoBurrZapTest is Test {
         }
     }
 
-    function _ensureNoZapBalance(BoycoBurrZap zap) internal {
+    function _ensureNoZapBalance(BoycoBurrZap _zap) internal view {
         assertEq(
-            IERC20(USDC).balanceOf(address(zap)),
+            IERC20(USDC).balanceOf(address(_zap)),
             0,
             "Zap should have no USDC balance"
         );
         assertEq(
-            IERC20(NECT).balanceOf(address(zap)),
+            IERC20(NECT).balanceOf(address(_zap)),
             0,
             "Zap should have no NECT balance"
         );
         assertEq(
             IERC20(IHoneyFactory(HONEY_FACTORY).honey()).balanceOf(
-                address(zap)
+                address(_zap)
             ),
             0,
             "Zap should have no HONEY balance"
         );
         assertEq(
-            IERC20(NECT_USDC_HONEY_POOL).balanceOf(address(zap)),
+            IERC20(NECT_USDC_HONEY_POOL).balanceOf(address(_zap)),
             0,
             "Zap should have no LP tokens balance"
         );
@@ -124,18 +124,17 @@ contract BoycoBurrZapTest is Test {
         address _pool
     ) internal view returns (uint256[] memory) {
         bytes32 poolId = IComposableStablePool(_pool).getPoolId();
-        (IERC20[] memory tokens, uint256[] memory bals, ) = IVault(VAULT)
-            .getPoolTokens(poolId);
+        (, uint256[] memory bals, ) = IVault(VAULT).getPoolTokens(poolId);
         uint256 bptIndex = IComposableStablePool(_pool).getBptIndex();
         uint256[] memory balsNoBpt = _dropBptItem(bals, bptIndex);
         uint256[] memory ratios = new uint256[](balsNoBpt.length - 1);
         for (uint256 i = 0; i < balsNoBpt.length - 1; i++) {
-            console2.log("balsNoBpt[i]", balsNoBpt[i]);
+            console.log("balsNoBpt[i]", balsNoBpt[i]);
             ratios[i] = (balsNoBpt[i] * 1e18) / balsNoBpt[i + 1];
-            console2.log("ratios[i]", ratios[i]);
+            console.log("ratios[i]", ratios[i]);
         }
-        console2.log("balsNoBpt[i]", balsNoBpt[balsNoBpt.length - 1]);
-        console2.log("------------");
+        console.log("balsNoBpt[i]", balsNoBpt[balsNoBpt.length - 1]);
+        console.log("------------");
 
         return ratios;
     }
@@ -166,7 +165,7 @@ contract BoycoBurrZapTest is Test {
     function _dropBptItem(
         uint256[] memory amounts,
         uint256 bptIndex
-    ) internal view returns (uint256[] memory) {
+    ) internal pure returns (uint256[] memory) {
         uint256[] memory amountsWithoutBpt = new uint256[](amounts.length - 1);
         for (uint256 i = 0; i < amountsWithoutBpt.length; i++) {
             amountsWithoutBpt[i] = amounts[i < bptIndex ? i : i + 1];
