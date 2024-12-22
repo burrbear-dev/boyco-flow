@@ -29,6 +29,7 @@ contract BoycoBurrZap is Ownable {
     address public immutable NECT;
 
     mapping(address => bool) public whitelisted;
+
     modifier onlyWhitelisted() {
         require(whitelisted[msg.sender], ERROR_NOT_WHITELISTED);
         _;
@@ -50,13 +51,7 @@ contract BoycoBurrZap is Ownable {
      * @param _nect Nectar token address
      * @param _pBondProxy Beraborrow's psm bond proxy address to deposit and mint NECT from
      */
-    constructor(
-        address _token,
-        address _pool,
-        address _honeyFactory,
-        address _nect,
-        address _pBondProxy
-    ) Ownable() {
+    constructor(address _token, address _pool, address _honeyFactory, address _nect, address _pBondProxy) Ownable() {
         require(_token != address(0), ERROR_INVALID_RECIPIENT);
         require(_pool != address(0), ERROR_INVALID_RECIPIENT);
         require(_honeyFactory != address(0), ERROR_INVALID_RECIPIENT);
@@ -75,7 +70,7 @@ contract BoycoBurrZap is Ownable {
 
         // ensure all tokens are present in the pool
         bytes32 poolId = IComposableStablePool(_pool).getPoolId();
-        (IERC20[] memory tokens, , ) = IVault(_vault).getPoolTokens(poolId);
+        (IERC20[] memory tokens,,) = IVault(_vault).getPoolTokens(poolId);
         bool honeyInPool = false;
         bool tokenInPool = false;
         bool nectInPool = false;
@@ -84,10 +79,7 @@ contract BoycoBurrZap is Ownable {
             else if (address(tokens[i]) == _token) tokenInPool = true;
             else if (address(tokens[i]) == _nect) nectInPool = true;
         }
-        require(
-            honeyInPool && tokenInPool && nectInPool,
-            "Pool must have HONEY, TOKEN, and NECT"
-        );
+        require(honeyInPool && tokenInPool && nectInPool, "Pool must have HONEY, TOKEN, and NECT");
 
         // Set approvals once at deployment
         IERC20(_token).approve(_pBondProxy, type(uint256).max);
@@ -115,27 +107,17 @@ contract BoycoBurrZap is Ownable {
     /// @notice Takes a token (e.g. USDC) and mints LP tokens in return
     /// @param _depositAmount Amount of tokens to deposit
     /// @param _recipient Address to receive LP tokens
-    function deposit(
-        uint256 _depositAmount,
-        address _recipient
-    ) public onlyWhitelisted {
-        require(
-            _recipient != address(0) &&
-                _recipient != address(this) &&
-                _recipient != POOL,
-            ERROR_INVALID_RECIPIENT
-        );
+    function deposit(uint256 _depositAmount, address _recipient) public onlyWhitelisted {
+        require(_recipient != address(0) && _recipient != address(this) && _recipient != POOL, ERROR_INVALID_RECIPIENT);
         require(_depositAmount > 0, ERROR_INVALID_DEPOSIT);
         // Transfer tokens from sender
         IERC20(TOKEN).transferFrom(msg.sender, address(this), _depositAmount);
 
         // Get pool information
         bytes32 poolId = IComposableStablePool(POOL).getPoolId();
-        (IERC20[] memory tokens, uint256[] memory balances, ) = IVault(VAULT)
-            .getPoolTokens(poolId);
+        (IERC20[] memory tokens, uint256[] memory balances,) = IVault(VAULT).getPoolTokens(poolId);
         uint256 bptIndex = IComposableStablePool(POOL).getBptIndex();
-        uint256[] memory scalingFactors = IComposableStablePool(POOL)
-            .getScalingFactors();
+        uint256[] memory scalingFactors = IComposableStablePool(POOL).getScalingFactors();
 
         // Calculate amounts and validate pool composition
         uint256[] memory amountsIn = _mintAmounts(
@@ -162,22 +144,12 @@ contract BoycoBurrZap is Ownable {
      * 3. Handles minting of both NECT and HONEY tokens
      * 4. Returns array of token amounts needed for pool join
      */
-    function _mintAmounts(
-        MintParams memory params
-    ) private returns (uint256[] memory amountsIn) {
+    function _mintAmounts(MintParams memory params) private returns (uint256[] memory amountsIn) {
         uint256 len = params.balances.length;
         amountsIn = new uint256[](len);
         // Calculate normalized balances and find token indices
-        (
-            uint256[] memory normBalances,
-            uint256 totalNormBal,
-            uint256 tokenIndex
-        ) = _getNormalizedBalancesAndTokenIndex(
-                params.tokens,
-                params.balances,
-                params.scalingFactors,
-                params.bptIndex
-            );
+        (uint256[] memory normBalances, uint256 totalNormBal, uint256 tokenIndex) =
+            _getNormalizedBalancesAndTokenIndex(params.tokens, params.balances, params.scalingFactors, params.bptIndex);
 
         uint256 rateDiff;
         {
@@ -188,33 +160,22 @@ contract BoycoBurrZap is Ownable {
             rateDiff = 1e18 - (((len - 2) * 1e18 + honeyRate) / (len - 1));
         }
 
-        uint256 scaledDeposit = _upscale(
-            params.depositAmount,
-            _computeScalingFactor(address(TOKEN))
-        );
+        uint256 scaledDeposit = _upscale(params.depositAmount, _computeScalingFactor(address(TOKEN)));
         // Calculate final amounts
         for (uint256 i = 0; i < len; i++) {
             if (i == params.bptIndex) {
                 continue;
             }
-            uint256 multiplier = (address(params.tokens[i]) == HONEY)
-                ? 1e18 + (rateDiff * (len - 2))
-                : 1e18 - rateDiff;
-            uint256 amountIn = (scaledDeposit * normBalances[i] * multiplier) /
-                totalNormBal /
-                1e18;
+            uint256 multiplier = (address(params.tokens[i]) == HONEY) ? 1e18 + (rateDiff * (len - 2)) : 1e18 - rateDiff;
+            uint256 amountIn = (scaledDeposit * normBalances[i] * multiplier) / totalNormBal / 1e18;
 
             if (address(params.tokens[i]) == NECT) {
                 amountsIn[i] = IPSMBondProxy(PSM_BOND_PROXY).deposit(
-                    _downscaleDown(amountIn, params.scalingFactors[tokenIndex]),
-                    address(this)
+                    _downscaleDown(amountIn, params.scalingFactors[tokenIndex]), address(this)
                 );
             } else if (address(params.tokens[i]) == HONEY) {
                 amountsIn[i] = IHoneyFactory(HONEY_FACTORY).mint(
-                    TOKEN,
-                    _downscaleDown(amountIn, params.scalingFactors[tokenIndex]),
-                    address(this),
-                    false
+                    TOKEN, _downscaleDown(amountIn, params.scalingFactors[tokenIndex]), address(this), false
                 );
             }
         }
@@ -232,15 +193,7 @@ contract BoycoBurrZap is Ownable {
         uint256[] memory balances,
         uint256[] memory scalingFactors,
         uint256 bptIndex
-    )
-        private
-        view
-        returns (
-            uint256[] memory normBalances,
-            uint256 totalNormBal,
-            uint256 tokenIndex
-        )
-    {
+    ) private view returns (uint256[] memory normBalances, uint256 totalNormBal, uint256 tokenIndex) {
         uint256 len = balances.length;
         normBalances = new uint256[](len);
 
@@ -276,18 +229,14 @@ contract BoycoBurrZap is Ownable {
                 assets: _asIAsset(tokens),
                 maxAmountsIn: maxAmountsIn,
                 userData: abi.encode(
-                    StablePoolUserData.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT,
-                    _dropBptItem(amountsIn, bptIndex),
-                    0
+                    StablePoolUserData.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT, _dropBptItem(amountsIn, bptIndex), 0
                 ),
                 fromInternalBalance: false
             })
         );
     }
 
-    function _asIAsset(
-        IERC20[] memory addresses
-    ) internal pure returns (IAsset[] memory assets) {
+    function _asIAsset(IERC20[] memory addresses) internal pure returns (IAsset[] memory assets) {
         // solhint-disable-next-line no-inline-assembly
         assembly {
             assets := addresses
@@ -297,10 +246,7 @@ contract BoycoBurrZap is Ownable {
     /**
      * @dev Remove the item at `_bptIndex` from an arbitrary array (e.g., amountsIn).
      */
-    function _dropBptItem(
-        uint256[] memory amounts,
-        uint256 bptIndex
-    ) internal pure returns (uint256[] memory) {
+    function _dropBptItem(uint256[] memory amounts, uint256 bptIndex) internal pure returns (uint256[] memory) {
         uint256[] memory amountsWithoutBpt = new uint256[](amounts.length - 1);
         for (uint256 i = 0; i < amountsWithoutBpt.length; i++) {
             amountsWithoutBpt[i] = amounts[i < bptIndex ? i : i + 1];
@@ -313,9 +259,7 @@ contract BoycoBurrZap is Ownable {
      * @dev Returns a scaling factor that, when multiplied to a token amount for `token`, normalizes its balance as if
      * it had 18 decimals.
      */
-    function _computeScalingFactor(
-        address _token
-    ) internal view returns (uint256) {
+    function _computeScalingFactor(address _token) internal view returns (uint256) {
         // Tokens that don't implement the `decimals` method are not supported.
         uint256 tokenDecimals = uint256(IERC20Detailed(_token).decimals());
         require(tokenDecimals <= 18, "Token decimals must be <= 18");
@@ -341,17 +285,9 @@ interface IComposableStablePool {
 interface IHoneyFactory {
     function honey() external view returns (address);
     function mintRates(address asset) external view returns (uint256);
-    function mint(
-        address asset,
-        uint256 amount,
-        address receiver,
-        bool expectBasketMode
-    ) external returns (uint256);
+    function mint(address asset, uint256 amount, address receiver, bool expectBasketMode) external returns (uint256);
 }
 
 interface IPSMBondProxy {
-    function deposit(
-        uint256 amount,
-        address receiver
-    ) external returns (uint256);
+    function deposit(uint256 amount, address receiver) external returns (uint256);
 }
