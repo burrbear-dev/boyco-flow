@@ -26,6 +26,7 @@ struct BalancesParams {
 }
 
 contract BoycoBurrZap {
+    address public immutable TOKEN;
     address public immutable VAULT;
     address public immutable BAL_QUERIES;
     address public immutable HONEY_FACTORY;
@@ -34,86 +35,32 @@ contract BoycoBurrZap {
     address public immutable PSM_BOND_PROXY;
     address public immutable NECT;
     constructor(
+        address _token,
         address _vault,
         address _balQueries,
         address _honeyFactory,
         address _nect,
         address _pBondProxy
     ) {
+        TOKEN = _token;
         VAULT = _vault;
         BAL_QUERIES = _balQueries;
-        HONEY = IHoneyFactory(_honeyFactory).honey();
+        address _honey = IHoneyFactory(_honeyFactory).honey();
+        HONEY = _honey;
         HONEY_FACTORY = _honeyFactory;
         NECT = _nect;
         PSM_BOND_PROXY = _pBondProxy;
+
+        IERC20(_token).approve(_pBondProxy, type(uint256).max);
+        // @TODO this might not be needed
         IERC20(_nect).approve(_pBondProxy, type(uint256).max);
-    }
-
-    function _getVaultTokenIndex(
-        address _token,
-        IERC20[] memory tokens
-    ) private view returns (uint256) {
-        for (uint256 i = 0; i < tokens.length; i++) {
-            if (address(tokens[i]) == _token) {
-                return i;
-            }
-        }
-        revert("Token not found in pool");
-    }
-
-    function _queryJoin(
-        address _pool,
-        address _token,
-        uint256 _tokenAmount
-    ) private {
-        bytes32 poolId = IComposableStablePool(_pool).getPoolId();
-        (IERC20[] memory tokens, uint256[] memory balances, ) = IVault(VAULT)
-            .getPoolTokens(poolId);
-        uint256 tokenIndex = _getVaultTokenIndex(_token, tokens);
-        uint256 tokenBalance = balances[tokenIndex];
-        uint256 totalSupply = IComposableStablePool(_pool).getActualSupply();
-        uint256 expectedBptOut = (_tokenAmount * totalSupply) /
-            1e18 /
-            tokenBalance;
-        console2.log("_tokenAmount", _tokenAmount);
-        console2.log("totalSupply", totalSupply);
-        console2.log("tokenBalance", tokenBalance);
-        console2.log("expectedBptOut", expectedBptOut);
-
-        // Verify with queryJoin
-        IVault.JoinPoolRequest memory request;
-        request.assets = _asIAsset(tokens);
-        // request.maxAmountsIn = amountsIn;
-
-        request.userData = abi.encode(
-            StablePoolUserData.JoinKind.ALL_TOKENS_IN_FOR_EXACT_BPT_OUT,
-            expectedBptOut
-        );
-        // request.fromInternalBalance = false;
-
-        // Query join to verify our calculations
-        (
-            uint256 actualBptOut,
-            uint256[] memory actualAmountsIn
-        ) = IBalancerQueries(BAL_QUERIES).queryJoin(
-                poolId,
-                address(this),
-                address(this),
-                request
-            );
-        console2.log("actualBptOut", actualBptOut);
-        console2.log("actualAmountsIn[0]", actualAmountsIn[0]);
-        console2.log("actualAmountsIn[1]", actualAmountsIn[1]);
-        console2.log("actualAmountsIn[2]", actualAmountsIn[2]);
-    }
-
-    function _asIAsset(
-        IERC20[] memory addresses
-    ) internal pure returns (IAsset[] memory assets) {
-        // solhint-disable-next-line no-inline-assembly
-        assembly {
-            assets := addresses
-        }
+        // at deployment time of this contract _token might not
+        // have been added to the honey factory list of supported tokens
+        IERC20(_token).approve(_honeyFactory, type(uint256).max);
+        // vault approvals
+        IERC20(_token).approve(_vault, type(uint256).max);
+        IERC20(_nect).approve(_vault, type(uint256).max);
+        IERC20(_honey).approve(_vault, type(uint256).max);
     }
 
     function _getBalancesNormalized(
@@ -208,13 +155,16 @@ contract BoycoBurrZap {
 
     // @TODO add Owner and whitelist
     // since no one else should be able to mint NECT at 100% LTV
+    // @TODO add receiver address
     function deposit(
-        address _token,
         uint256 _depositAmount,
-        address _pool
+        address _pool,
+        address _recipient
     ) public {
+        IERC20(TOKEN).transferFrom(msg.sender, address(this), _depositAmount);
+
         BalancesParams memory params = _getBalancesNormalized(
-            _token,
+            TOKEN,
             _depositAmount,
             _pool
         );
@@ -223,35 +173,31 @@ contract BoycoBurrZap {
         console2.log("amountsToConvert[1]", params.amountsToConvert[1]);
         console2.log("amountsToConvert[2]", params.amountsToConvert[2]);
 
-        IERC20(_token).transferFrom(msg.sender, address(this), _depositAmount);
+        uint256[] memory amountsIn = new uint256[](
+            params.amountsToConvert.length + 1
+        );
 
         // downscale down inside the _getBalancesNormalized
-        uint256 nectAmount = _drawNect(
-            _token,
+        amountsIn[params.nectIndex] = _mintNect(
+            TOKEN,
             params.amountsToConvert[params.nectIndex]
         );
-        console2.log("BAL NECT\t", nectAmount);
+        console2.log("BAL NECT\t", amountsIn[params.nectIndex]);
 
-        uint256 tokenAmount = params.amountsToConvert[params.honeyIndex];
-        IERC20(_token).approve(address(HONEY_FACTORY), tokenAmount);
-
-        uint256 honeyAmount = IHoneyFactory(HONEY_FACTORY).mint(
-            _token,
-            tokenAmount,
+        amountsIn[params.honeyIndex] = IHoneyFactory(HONEY_FACTORY).mint(
+            TOKEN,
+            params.amountsToConvert[params.honeyIndex],
             address(this),
             // @TODO confirm with Berachain team about `expectBasketMode` argument
             false
         );
-        console2.log("BAL HONEY\t", honeyAmount);
+        console2.log("BAL HONEY\t", amountsIn[params.honeyIndex]);
 
-        uint256 tokenRemaining = IERC20(_token).balanceOf(address(this));
-        _queryJoin(
-            _pool,
-            _token,
-            params.amountsToConvertScaled[params.tokenIndex]
-        );
+        amountsIn[params.tokenIndex] = IERC20(TOKEN).balanceOf(address(this));
 
-        console2.log("BAL USDC\t", tokenRemaining);
+        console2.log("BAL USDC\t", amountsIn[params.tokenIndex]);
+
+        _joinPool(_pool, amountsIn, _recipient);
 
         // @TODO return _token leftovers to msg.sender
         // console2.log("normBalsNoBpt[0]", params.normBalsNoBpt[0]);
@@ -260,13 +206,126 @@ contract BoycoBurrZap {
         // console2.log("normTotalBal", params.normTotalBal);
     }
 
-    function _drawNect(
+    function _mintNect(
         address _token,
         uint256 _amount
     ) private returns (uint256) {
-        IERC20(_token).approve(PSM_BOND_PROXY, _amount);
-        console2.log("depositing USDC for NECT minting", _amount);
         return IPSMBondProxy(PSM_BOND_PROXY).deposit(_amount, address(this));
+    }
+
+    function _getVaultTokenIndex(
+        address _token,
+        IERC20[] memory tokens
+    ) private view returns (uint256) {
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (address(tokens[i]) == _token) {
+                return i;
+            }
+        }
+        revert("Token not found in pool");
+    }
+
+    function _joinPool(
+        address _pool,
+        uint256[] memory _amountsIn,
+        address _recipient
+    ) private {
+        bytes32 poolId = IComposableStablePool(_pool).getPoolId();
+        (IERC20[] memory tokens, , ) = IVault(VAULT).getPoolTokens(poolId);
+        uint256 bptIndex = IComposableStablePool(_pool).getBptIndex();
+
+        // maxAmountsIn length is +1 bc of the bpt token
+        uint256[] memory maxAmountsIn = new uint256[](_amountsIn.length);
+        for (uint256 i = 0; i < _amountsIn.length; i++) {
+            console2.log("_amountsIn[i]", _amountsIn[i]);
+            maxAmountsIn[i] = type(uint256).max;
+        }
+
+        IVault(VAULT).joinPool(
+            poolId,
+            address(this),
+            _recipient,
+            IVault.JoinPoolRequest({
+                assets: _asIAsset(tokens),
+                maxAmountsIn: maxAmountsIn,
+                userData: abi.encode(
+                    StablePoolUserData.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT,
+                    _dropBptItem(_amountsIn, bptIndex),
+                    0
+                ),
+                fromInternalBalance: false
+            })
+        );
+    }
+
+    function _queryJoin(
+        address _pool,
+        address _token,
+        uint256 _tokenAmount
+    ) private {
+        bytes32 poolId = IComposableStablePool(_pool).getPoolId();
+        (IERC20[] memory tokens, uint256[] memory balances, ) = IVault(VAULT)
+            .getPoolTokens(poolId);
+        uint256 tokenIndex = _getVaultTokenIndex(_token, tokens);
+        uint256 tokenBalance = balances[tokenIndex];
+        uint256 totalSupply = IComposableStablePool(_pool).getActualSupply();
+        uint256 expectedBptOut = (_tokenAmount * totalSupply) /
+            1e18 /
+            tokenBalance;
+        console2.log("_tokenAmount", _tokenAmount);
+        console2.log("totalSupply", totalSupply);
+        console2.log("tokenBalance", tokenBalance);
+        console2.log("expectedBptOut", expectedBptOut);
+
+        // Verify with queryJoin
+        IVault.JoinPoolRequest memory request;
+        request.assets = _asIAsset(tokens);
+        // request.maxAmountsIn = amountsIn;
+
+        request.userData = abi.encode(
+            StablePoolUserData.JoinKind.ALL_TOKENS_IN_FOR_EXACT_BPT_OUT,
+            expectedBptOut
+        );
+        // request.fromInternalBalance = false;
+
+        // Query join to verify our calculations
+        (
+            uint256 actualBptOut,
+            uint256[] memory actualAmountsIn
+        ) = IBalancerQueries(BAL_QUERIES).queryJoin(
+                poolId,
+                address(this),
+                address(this),
+                request
+            );
+        console2.log("actualBptOut", actualBptOut);
+        console2.log("actualAmountsIn[0]", actualAmountsIn[0]);
+        console2.log("actualAmountsIn[1]", actualAmountsIn[1]);
+        console2.log("actualAmountsIn[2]", actualAmountsIn[2]);
+    }
+
+    function _asIAsset(
+        IERC20[] memory addresses
+    ) internal pure returns (IAsset[] memory assets) {
+        // solhint-disable-next-line no-inline-assembly
+        assembly {
+            assets := addresses
+        }
+    }
+
+    /**
+     * @dev Remove the item at `_bptIndex` from an arbitrary array (e.g., amountsIn).
+     */
+    function _dropBptItem(
+        uint256[] memory amounts,
+        uint256 bptIndex
+    ) internal view returns (uint256[] memory) {
+        uint256[] memory amountsWithoutBpt = new uint256[](amounts.length - 1);
+        for (uint256 i = 0; i < amountsWithoutBpt.length; i++) {
+            amountsWithoutBpt[i] = amounts[i < bptIndex ? i : i + 1];
+        }
+
+        return amountsWithoutBpt;
     }
 
     /**
