@@ -42,12 +42,20 @@ contract BoycoBurrZap is Ownable {
         uint256 depositAmount;
     }
 
+    /**
+     * @notice Initializes the BoycoBurrZap contract
+     * @param _token Token to deposit (e.g. USDC)
+     * @param _pool Pool to deposit into (e.g. NECT_USDC_HONEY_POOL)
+     * @param _honeyFactory Honey factory to mint honey
+     * @param _nect Nectar token address
+     * @param _pBondProxy Beraborrow's psm bond proxy address to deposit and mint NECT from
+     */
     constructor(
-        address _token, // token to deposit (e.g. USDC)
-        address _pool, // pool to deposit into (e.g. NECT_USDC_HONEY_POOL)
-        address _honeyFactory, // honey factory to mint honey
-        address _nect, // nectar token address
-        address _pBondProxy // beraborrow's psm bond proxy address to deposit and mint NECT from
+        address _token,
+        address _pool,
+        address _honeyFactory,
+        address _nect,
+        address _pBondProxy
     ) Ownable() {
         require(_token != address(0), ERROR_INVALID_RECIPIENT);
         require(_pool != address(0), ERROR_INVALID_RECIPIENT);
@@ -103,7 +111,8 @@ contract BoycoBurrZap is Ownable {
     /////////////////////////
     /////// WHITELISTED /////
     /////////////////////////
-    /// @notice Deposits tokens and mints LP tokens
+
+    /// @notice Takes a token (e.g. USDC) and mints LP tokens in return
     /// @param _depositAmount Amount of tokens to deposit
     /// @param _recipient Address to receive LP tokens
     function deposit(
@@ -145,7 +154,14 @@ contract BoycoBurrZap is Ownable {
     /////////////////////////
     /////// HELPERS /////////
     /////////////////////////
-    /// @dev Calculates the amounts needed for pool join
+    /**
+     * @notice Calculates proportional amounts of each token needed to join the pool
+     * @dev Uses the following logic:
+     * 1. Normalizes all balances to 18 decimals for consistent math
+     * 2. Calculates rate differences based on HoneyFactory mint rates
+     * 3. Handles minting of both NECT and HONEY tokens
+     * 4. Returns array of token amounts needed for pool join
+     */
     function _mintAmounts(
         MintParams memory params
     ) private returns (uint256[] memory amountsIn) {
