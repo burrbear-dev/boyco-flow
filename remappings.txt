@@ -1,0 +1,12 @@
+ds-test/=lib/balancer-v2-monorepo/../../pvt/lib/forge-std/lib/ds-test/src/
+forge-std/=lib/forge-std/src/
+
+@balancer-labs/v2-interfaces/=lib/balancer-v2-monorepo/pkg/interfaces/
+@balancer-labs/v2-liquidity-mining/=lib/balancer-v2-monorepo/pkg/liquidity-mining/
+@balancer-labs/v2-pool-linear/=lib/balancer-v2-monorepo/pkg/pool-linear/
+@balancer-labs/v2-pool-stable/=lib/balancer-v2-monorepo/pkg/pool-stable/
+@balancer-labs/v2-pool-utils/=lib/balancer-v2-monorepo/pkg/pool-utils/
+@balancer-labs/v2-pool-weighted/=lib/balancer-v2-monorepo/pkg/pool-weighted/
+@balancer-labs/v2-solidity-utils/=lib/balancer-v2-monorepo/pkg/solidity-utils/
+@balancer-labs/v2-standalone-utils/=lib/balancer-v2-monorepo/pkg/standalone-utils/
+@balancer-labs/v2-vault/=lib/balancer-v2-monorepo/pkg/vault/
