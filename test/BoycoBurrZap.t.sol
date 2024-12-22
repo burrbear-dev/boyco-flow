@@ -33,15 +33,41 @@ contract BoycoBurrZapTest is Test {
 
     uint256 constant RATIO_PRECISION = 1e6; // 0.0001%
     BoycoBurrZap zap;
+    address alice;
+    address bob;
 
     function setUp() public {
         vm.createSelectFork(
             "https://rockbeard-eth-cartio.berachain.com",
             2399510
         );
+
+        alice = makeAddr("alice");
+        bob = makeAddr("bob");
         deal(USDC, address(this), 2 ** 111);
+        deal(USDC, alice, 2 ** 111);
+        deal(USDC, bob, 2 ** 111);
         _etchContract(PSM_WHITELISTED);
         zap = BoycoBurrZap(PSM_WHITELISTED);
+        zap.addWhitelisted(address(this));
+    }
+
+    function test_whitelisted() public {
+        assertEq(zap.whitelisted(bob), false, "Should not be whitelisted");
+        zap.addWhitelisted(bob);
+        assertEq(zap.whitelisted(bob), true, "Should be whitelisted");
+        zap.removeWhitelisted(bob);
+        assertEq(zap.whitelisted(bob), false, "Should not be whitelisted");
+
+        vm.startPrank(bob);
+        IERC20(USDC).approve(address(zap), 1e18);
+        vm.expectRevert("Not whitelisted");
+        zap.deposit(1e18, address(this));
+
+        vm.expectRevert("BAL#426");
+        zap.addWhitelisted(bob);
+
+        vm.stopPrank();
     }
 
     function test_deposit() public {
@@ -50,22 +76,49 @@ contract BoycoBurrZapTest is Test {
         IERC20(USDC).approve(address(zap), usdcAmount);
         zap.deposit(usdcAmount, address(this));
         _ensureNoZapBalance(zap);
-        uint256 lpTokensBalance = IERC20(NECT_USDC_HONEY_POOL).balanceOf(
-            address(this)
+        _ensureLpTokensMinted(NECT_USDC_HONEY_POOL, address(this));
+        _ensureRatiosWithinTolerance(
+            ratiosPre,
+            _getPoolTokenRatios(NECT_USDC_HONEY_POOL)
         );
-        console.log("lpTokensBalance", lpTokensBalance);
-        assertGt(lpTokensBalance, 0, "LP Tokens should be minted");
-        uint256[] memory ratiosPost = _getPoolTokenRatios(NECT_USDC_HONEY_POOL);
-        for (uint256 i = 0; i < ratiosPre.length; i++) {
+    }
+
+    function test_Fuzz_deposit(uint256 _usdcAmount) public {
+        vm.assume(_usdcAmount > 0 && _usdcAmount < 1e6 * 1e11);
+        IERC20(USDC).approve(address(zap), _usdcAmount);
+        zap.deposit(_usdcAmount, address(this));
+        _ensureNoZapBalance(zap);
+        _ensureLpTokensMinted(NECT_USDC_HONEY_POOL, address(this));
+        _ensureRatiosWithinTolerance(
+            _getPoolTokenRatios(NECT_USDC_HONEY_POOL),
+            _getPoolTokenRatios(NECT_USDC_HONEY_POOL)
+        );
+    }
+
+    function _ensureRatiosWithinTolerance(
+        uint256[] memory _ratiosPre,
+        uint256[] memory _ratiosPost
+    ) internal view {
+        for (uint256 i = 0; i < _ratiosPre.length; i++) {
             uint256 ratioDiff = Math.abs(
                 int256(
                     RATIO_PRECISION -
-                        ((ratiosPre[i] * RATIO_PRECISION) / ratiosPost[i])
+                        ((_ratiosPre[i] * RATIO_PRECISION) / _ratiosPost[i])
                 )
             );
-            console.log("ratioDiff", ratioDiff);
             assertLt(ratioDiff, 10, "Ratio should be within 0.001%");
         }
+    }
+
+    function _ensureLpTokensMinted(
+        address _pool,
+        address _recipient
+    ) internal view {
+        assertGt(
+            IERC20(_pool).balanceOf(_recipient),
+            0,
+            "LP Tokens should be minted"
+        );
     }
 
     function _ensureNoZapBalance(BoycoBurrZap _zap) internal view {
@@ -101,12 +154,20 @@ contract BoycoBurrZapTest is Test {
             NECT,
             PSM_BOND_PROXY
         );
+
         // make this contract whitelisted for PSM
         vm.etch(_target, getCode(address(zap)));
-        address _honey = IHoneyFactory(HONEY_FACTORY).honey();
+
+        // fix ownership
+        vm.startPrank(address(0));
+        BoycoBurrZap(_target).transferOwnership(address(this));
+        vm.stopPrank();
+
+        // fix token approvals
         // since the contract will be at a different address than the one deployed
         // all token approvals will be lost therefore we need to approve the tokens
         // again for the new address
+        address _honey = IHoneyFactory(HONEY_FACTORY).honey();
         vm.startPrank(_target);
         IERC20(USDC).approve(PSM_BOND_PROXY, type(uint256).max);
         // at deployment time of this contract USDC might not
@@ -129,12 +190,8 @@ contract BoycoBurrZapTest is Test {
         uint256[] memory balsNoBpt = _dropBptItem(bals, bptIndex);
         uint256[] memory ratios = new uint256[](balsNoBpt.length - 1);
         for (uint256 i = 0; i < balsNoBpt.length - 1; i++) {
-            console.log("balsNoBpt[i]", balsNoBpt[i]);
             ratios[i] = (balsNoBpt[i] * 1e18) / balsNoBpt[i + 1];
-            console.log("ratios[i]", ratios[i]);
         }
-        console.log("balsNoBpt[i]", balsNoBpt[balsNoBpt.length - 1]);
-        console.log("------------");
 
         return ratios;
     }

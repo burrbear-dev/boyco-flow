@@ -8,18 +8,16 @@ import {IERC20} from "@balancer-labs/v2-interfaces/contracts/solidity-utils/open
 import {_upscale, _downscaleDown} from "@balancer-labs/v2-solidity-utils/contracts/helpers/ScalingHelpers.sol";
 import {IBalancerQueries} from "@balancer-labs/v2-interfaces/contracts/standalone-utils/IBalancerQueries.sol";
 import {StablePoolUserData} from "@balancer-labs/v2-interfaces/contracts/pool-stable/StablePoolUserData.sol";
+import {Ownable} from "@balancer-labs/v2-solidity-utils/contracts/openzeppelin/Ownable.sol";
 
-// @TODO add Owner and whitelist
-// since no one else should be able to mint NECT at 100% LTV
-// @TODO add receiver address
-
-contract BoycoBurrZap {
+contract BoycoBurrZap is Ownable {
     // Constants for error messages to save gas
     string private constant ERROR_INVALID_RECIPIENT = "Invalid recipient";
     string private constant ERROR_INVALID_DEPOSIT = "Invalid deposit amount";
     string private constant ERROR_TOKEN_NOT_IN_POOL = "Token not in pool";
     string private constant ERROR_HONEY_RATE = "Invalid honey rate";
     string private constant ERROR_DECIMALS = "Token decimals > 18";
+    string private constant ERROR_NOT_WHITELISTED = "Not whitelisted";
 
     // Immutable state variables
     address public immutable TOKEN;
@@ -30,13 +28,28 @@ contract BoycoBurrZap {
     // Beraborrow related
     address public immutable PSM_BOND_PROXY;
     address public immutable NECT;
+
+    mapping(address => bool) public whitelisted;
+    modifier onlyWhitelisted() {
+        require(whitelisted[msg.sender], ERROR_NOT_WHITELISTED);
+        _;
+    }
+
+    struct MintParams {
+        IERC20[] tokens;
+        uint256[] balances;
+        uint256[] scalingFactors;
+        uint256 bptIndex;
+        uint256 depositAmount;
+    }
+
     constructor(
         address _token,
         address _pool,
         address _honeyFactory,
         address _nect,
         address _pBondProxy
-    ) {
+    ) Ownable() {
         require(_token != address(0), ERROR_INVALID_RECIPIENT);
         require(_pool != address(0), ERROR_INVALID_RECIPIENT);
         require(_honeyFactory != address(0), ERROR_INVALID_RECIPIENT);
@@ -80,7 +93,10 @@ contract BoycoBurrZap {
     /// @notice Deposits tokens and mints LP tokens
     /// @param _depositAmount Amount of tokens to deposit
     /// @param _recipient Address to receive LP tokens
-    function deposit(uint256 _depositAmount, address _recipient) public {
+    function deposit(
+        uint256 _depositAmount,
+        address _recipient
+    ) public onlyWhitelisted {
         require(
             _recipient != address(0) &&
                 _recipient != address(this) &&
@@ -111,14 +127,6 @@ contract BoycoBurrZap {
         );
         // Execute join pool transaction
         _joinPool(poolId, tokens, amountsIn, bptIndex, _recipient);
-    }
-
-    struct MintParams {
-        IERC20[] tokens;
-        uint256[] balances;
-        uint256[] scalingFactors;
-        uint256 bptIndex;
-        uint256 depositAmount;
     }
 
     /// @dev Calculates the amounts needed for pool join
@@ -178,8 +186,20 @@ contract BoycoBurrZap {
                 );
             }
         }
-        // for the token amount, we just use the left over amount
+        // for the token amount, we just use the left over balance
+        // because joinPool uses EXACT_TOKENS_IN_FOR_BPT_OUT
+        // this ensures that the vault will transfer the full amount
+        // of all token in the request and there is no dust left
+        // therefore we avoid having to transfer dust back to the user
         amountsIn[tokenIndex] = IERC20(TOKEN).balanceOf(address(this));
+    }
+
+    function addWhitelisted(address _whitelisted) public onlyOwner {
+        whitelisted[_whitelisted] = true;
+    }
+
+    function removeWhitelisted(address _whitelisted) public onlyOwner {
+        whitelisted[_whitelisted] = false;
     }
 
     /// @dev Helper function to get normalized balances
