@@ -10,7 +10,7 @@ import {StablePoolUserData} from "@balancer-labs/v2-interfaces/contracts/pool-st
 import {Ownable} from "@balancer-labs/v2-solidity-utils/contracts/openzeppelin/Ownable.sol";
 
 contract BoycoBurrZap is Ownable {
-    // Constants for error messages to save gas
+    // Constants for error messages
     string private constant ERROR_INVALID_RECIPIENT = "Invalid recipient";
     string private constant ERROR_INVALID_DEPOSIT = "Invalid deposit amount";
     string private constant ERROR_TOKEN_NOT_IN_POOL = "Token not in pool";
