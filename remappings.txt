@@ -1,6 +1,8 @@
 ds-test/=lib/balancer-v2-monorepo/../../pvt/lib/forge-std/lib/ds-test/src/
 forge-std/=lib/forge-std/src/
 
+@openzeppelin/=lib/openzeppelin-contracts/
+
 @balancer-labs/v2-interfaces/=lib/balancer-v2-monorepo/pkg/interfaces/
 @balancer-labs/v2-liquidity-mining/=lib/balancer-v2-monorepo/pkg/liquidity-mining/
 @balancer-labs/v2-pool-linear/=lib/balancer-v2-monorepo/pkg/pool-linear/

@@ -7,6 +7,8 @@ import "../src/BoycoBurrZap.sol";
 import {IERC20} from "@balancer-labs/v2-interfaces/contracts/solidity-utils/openzeppelin/IERC20.sol";
 import {Math} from "@balancer-labs/v2-solidity-utils/contracts/math/Math.sol";
 
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+
 contract BoycoBurrZapTest is Test {
     // cArtio environment
     address constant VAULT = 0x398D4CFB5D29d18BaA149497656904F2e8814EFb;
@@ -16,11 +18,14 @@ contract BoycoBurrZapTest is Test {
 
     // ---- BeraBorrow related addresses ----
     address constant NECT = 0xefEeD4d987F6d1dE0f23D116a578402456819C28;
-
     address constant PSM_WHITELISTED = 0xBa8F5f80C41BF5e169d9149Cd4977B1990Fc2736;
     address constant PSM_BOND_PROXY = 0xd064C80776497821313b1Dc0E3192d1a67b2a9fa;
+    uint256 constant RATIO_PRECISION = 1e18;
+    // 0.001%
+    uint256 constant RATIO_TOLERANCE = 1e13;
+    // 1e13 is 100 trillion
+    uint256 constant MAX_USDC_DEPOSIT = 1e6 * 1e13;
 
-    uint256 constant RATIO_PRECISION = 1e6; // 0.0001%
     BoycoBurrZap zap;
     address alice;
     address bob;
@@ -30,12 +35,18 @@ contract BoycoBurrZapTest is Test {
 
         alice = makeAddr("alice");
         bob = makeAddr("bob");
-        deal(USDC, address(this), 2 ** 111);
-        deal(USDC, alice, 2 ** 111);
-        deal(USDC, bob, 2 ** 111);
+        _dealTokens(address(this));
+        _dealTokens(alice);
+        _dealTokens(bob);
         _etchContract(PSM_WHITELISTED);
         zap = BoycoBurrZap(PSM_WHITELISTED);
         zap.whitelist(address(this));
+    }
+
+    function _dealTokens(address _user) internal {
+        deal(USDC, _user, 2 ** 111);
+        deal(NECT, _user, 2 ** 111);
+        deal(IHoneyFactory(HONEY_FACTORY).honey(), _user, 2 ** 111);
     }
 
     function test_whitelisted() public {
@@ -56,32 +67,204 @@ contract BoycoBurrZapTest is Test {
         vm.stopPrank();
     }
 
-    function test_deposit() public {
-        uint256 usdcAmount = 60 * 1e6;
-        uint256[] memory ratiosPre = _getPoolTokenRatios(NECT_USDC_HONEY_POOL);
-        IERC20(USDC).approve(address(zap), usdcAmount);
-        zap.deposit(usdcAmount, address(this));
-        _ensureNoZapBalance(zap);
-        _ensureLpTokensMinted(NECT_USDC_HONEY_POOL, address(this));
-        _ensureRatiosWithinTolerance(ratiosPre, _getPoolTokenRatios(NECT_USDC_HONEY_POOL));
+    function test_deposit_0() public {
+        vm.expectRevert("Invalid deposit amount");
+        zap.deposit(0, address(this));
+    }
+
+    function test_deposit_max() public {
+        _depositAndAssert(MAX_USDC_DEPOSIT);
+    }
+
+    function test_Fuzz_deposit_max(uint256) public {
+        _vaultAproveAllTokens(alice);
+        _doRandomSwap(alice);
+        _depositAndAssert(MAX_USDC_DEPOSIT);
     }
 
     function test_Fuzz_deposit(uint256 _usdcAmount) public {
-        vm.assume(_usdcAmount > 0 && _usdcAmount < 1e6 * 1e11);
-        IERC20(USDC).approve(address(zap), _usdcAmount);
-        zap.deposit(_usdcAmount, address(this));
-        _ensureNoZapBalance(zap);
-        _ensureLpTokensMinted(NECT_USDC_HONEY_POOL, address(this));
-        _ensureRatiosWithinTolerance(
-            _getPoolTokenRatios(NECT_USDC_HONEY_POOL), _getPoolTokenRatios(NECT_USDC_HONEY_POOL)
-        );
+        vm.assume(_usdcAmount > 0 && _usdcAmount < MAX_USDC_DEPOSIT);
+        _vaultAproveAllTokens(alice);
+        _doRandomSwap(alice);
+        _depositAndAssert(_usdcAmount);
     }
 
-    function _ensureRatiosWithinTolerance(uint256[] memory _ratiosPre, uint256[] memory _ratiosPost) internal pure {
-        for (uint256 i = 0; i < _ratiosPre.length; i++) {
-            uint256 ratioDiff = Math.abs(int256(RATIO_PRECISION - ((_ratiosPre[i] * RATIO_PRECISION) / _ratiosPost[i])));
-            assertLt(ratioDiff, 10, "Ratio should be within 0.001%");
+    function test_small_deposits() public {
+        _vaultAproveAllTokens(alice);
+        for (uint256 i = 1; i < 1e3; i++) {
+            _doRandomSwap(alice);
+            uint256 lpBalPre = IERC20(NECT_USDC_HONEY_POOL).balanceOf(address(this));
+            IERC20(USDC).approve(address(zap), i);
+            // deposit
+            try zap.deposit(i, address(this)) {}
+            catch (bytes memory reason) {
+                if (keccak256(abi.encodePacked(reason)) != keccak256(abi.encodePacked("BAL#003"))) {
+                    revert(string(reason));
+                }
+            }
+            // ensure zap has no tokens balance
+            _ensureNoZapBalance(zap);
+            // ensure LP tokens are minted
+            _ensureLpTokensMinted(NECT_USDC_HONEY_POOL, address(this));
+            uint256 lpBalPost = IERC20(NECT_USDC_HONEY_POOL).balanceOf(address(this));
+            assertGt(lpBalPost, lpBalPre, "LP tokens should be minted");
         }
+    }
+
+    function test_pool_ratio_loop_deposit() public {
+        _vaultAproveAllTokens(alice);
+
+        uint256 iterations = 30;
+        for (uint256 i = 0; i < iterations; i++) {
+            _doRandomSwap(alice);
+            uint256 depositAmount = vm.randomUint(0, MAX_USDC_DEPOSIT / iterations);
+            _depositAndAssert(depositAmount);
+        }
+    }
+
+    function _doRandomSwap(address _user) internal {
+        bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
+        (IERC20[] memory tokens, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
+        uint256 bptIndex = IComposableStablePool(NECT_USDC_HONEY_POOL).getBptIndex();
+        IERC20[] memory tokensNoBpt = _dropBptItem(tokens, bptIndex);
+        uint256 tokensLen = tokensNoBpt.length;
+        uint256 fromIndex = vm.randomUint(0, tokensLen - 1);
+        // Generate toIndex and ensure it's different from fromIndex
+        uint256 toIndex;
+        if (fromIndex == tokensLen - 1) {
+            toIndex = vm.randomUint(0, tokensLen - 2);
+        } else {
+            toIndex = vm.randomUint(0, tokensLen - 2);
+            if (toIndex >= fromIndex) toIndex += 1;
+        }
+        uint256 swapAmount = bals[fromIndex];
+        _swap(NECT_USDC_HONEY_POOL, _user, swapAmount, address(tokensNoBpt[fromIndex]), address(tokensNoBpt[toIndex]));
+    }
+
+    function _print_pool_balances() internal view {
+        bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
+        (, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
+        uint256 bptIndex = IComposableStablePool(NECT_USDC_HONEY_POOL).getBptIndex();
+        uint256[] memory balsNoBpt = _dropBptItem(bals, bptIndex);
+        console.log("balances[0]", balsNoBpt[0]);
+        console.log("balances[1]", balsNoBpt[1]);
+        console.log("balances[2]", balsNoBpt[2]);
+    }
+
+    function _getBalsNoBpt(address _pool) internal view returns (uint256[] memory) {
+        bytes32 poolId = IComposableStablePool(_pool).getPoolId();
+        (, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
+        uint256 bptIndex = IComposableStablePool(_pool).getBptIndex();
+        return _dropBptItem(bals, bptIndex);
+    }
+
+    function _depositAndAssert(uint256 _usdcAmount) internal {
+        uint256[] memory balsNoBptPre = _getBalsNoBpt(NECT_USDC_HONEY_POOL);
+        // approve zap to spend USDC
+        IERC20(USDC).approve(address(zap), _usdcAmount);
+        // deposit USDC
+        zap.deposit(_usdcAmount, address(this));
+        // ensure zap has no tokens balance
+        _ensureNoZapBalance(zap);
+        // ensure LP tokens are minted
+        _ensureLpTokensMinted(NECT_USDC_HONEY_POOL, address(this));
+        // ensure ratios are within tolerance
+        _ensureRatiosWithinTolerance(balsNoBptPre, _getBalsNoBpt(NECT_USDC_HONEY_POOL));
+    }
+
+    function _vaultAproveAllTokens(address _user) internal {
+        vm.startPrank(_user);
+        IERC20(USDC).approve(address(VAULT), type(uint256).max);
+        IERC20(NECT).approve(address(VAULT), type(uint256).max);
+        IERC20(IHoneyFactory(HONEY_FACTORY).honey()).approve(address(VAULT), type(uint256).max);
+        vm.stopPrank();
+    }
+
+    function _swap(address _pool, address _user, uint256 _amount, address _assetIn, address _assetOut) internal {
+        // Approve USDC spending by BEX vault
+        IERC20(_assetIn).approve(address(VAULT), _amount);
+        bytes32 poolId = IComposableStablePool(_pool).getPoolId();
+
+        // Prepare swap parameters
+        IVault.SingleSwap memory singleSwap = IVault.SingleSwap({
+            poolId: poolId,
+            kind: IVault.SwapKind.GIVEN_IN,
+            assetIn: IAsset(_assetIn),
+            assetOut: IAsset(_assetOut),
+            amount: _amount,
+            userData: ""
+        });
+
+        IVault.FundManagement memory funds = IVault.FundManagement({
+            sender: _user,
+            fromInternalBalance: false,
+            recipient: payable(_user),
+            toInternalBalance: false
+        });
+
+        // Execute swap - minimum amount out set to 0 for test purposes
+        // In production, you should calculate and set a proper minimum amount
+        vm.startPrank(_user);
+        IVault(VAULT).swap(
+            singleSwap,
+            funds,
+            0, // Minimum amount of _assetOut to receive
+            99999999999999999 // block number / timestamp
+        );
+        vm.stopPrank();
+    }
+
+    function _ensureRatiosWithinTolerance(uint256[] memory _balsPre, uint256[] memory _balsPost) internal view {
+        (bool withinTolerance, uint256 ratioDiff) = _isRatiosWithinTolerance(_balsPre, _balsPost);
+        if (!withinTolerance) {
+            _logArray(_balsPre, "BalsPre");
+            _logArray(_balsPost, "BalsPost");
+            assertLt(ratioDiff, RATIO_TOLERANCE, "Ratio should be within 0.1%");
+        }
+    }
+
+    function _isRatiosWithinTolerance(uint256[] memory _balsPre, uint256[] memory _balsPost)
+        internal
+        view
+        returns (bool, uint256)
+    {
+        uint256 ratioDiff;
+        uint256 totalPre = 0;
+        uint256 totalPost = 0;
+        bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
+        (IERC20[] memory tokens,,) = IVault(VAULT).getPoolTokens(poolId);
+        uint256 bptIndex = IComposableStablePool(NECT_USDC_HONEY_POOL).getBptIndex();
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (i == bptIndex) {
+                continue;
+            }
+            totalPre += _upscale(_balsPre[i], _computeScalingFactor(address(tokens[i])));
+            totalPost += _upscale(_balsPost[i], _computeScalingFactor(address(tokens[i])));
+        }
+
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (i == bptIndex) {
+                continue;
+            }
+            uint256 ratioPre =
+                (_upscale(_balsPre[i], _computeScalingFactor(address(tokens[i]))) * RATIO_PRECISION) / totalPre;
+            uint256 ratioPost =
+                (_upscale(_balsPost[i], _computeScalingFactor(address(tokens[i]))) * RATIO_PRECISION) / totalPost;
+            ratioDiff = Math.abs(int256(ratioPre - ratioPost));
+            if (ratioDiff >= RATIO_TOLERANCE) {
+                return (false, ratioDiff);
+            }
+        }
+        return (true, ratioDiff);
+    }
+
+    function _logArray(uint256[] memory _array, string memory _label) internal pure {
+        string memory s = string(abi.encodePacked(_label, ": [ "));
+        for (uint256 i = 0; i < _array.length; i++) {
+            s = string(abi.encodePacked(s, Strings.toString(_array[i]), ", "));
+        }
+        s = string(abi.encodePacked(s, " ]"));
+        console.log(s);
     }
 
     function _ensureLpTokensMinted(address _pool, address _recipient) internal view {
@@ -128,12 +311,20 @@ contract BoycoBurrZapTest is Test {
 
     function _getPoolTokenRatios(address _pool) internal view returns (uint256[] memory) {
         bytes32 poolId = IComposableStablePool(_pool).getPoolId();
-        (, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
+        (IERC20[] memory tokens, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
         uint256 bptIndex = IComposableStablePool(_pool).getBptIndex();
         uint256[] memory balsNoBpt = _dropBptItem(bals, bptIndex);
-        uint256[] memory ratios = new uint256[](balsNoBpt.length - 1);
-        for (uint256 i = 0; i < balsNoBpt.length - 1; i++) {
-            ratios[i] = (balsNoBpt[i] * 1e18) / balsNoBpt[i + 1];
+
+        // Calculate total balance
+        uint256 total = 0;
+        for (uint256 i = 0; i < balsNoBpt.length; i++) {
+            total += _upscale(balsNoBpt[i], _computeScalingFactor(address(tokens[i])));
+        }
+
+        // Calculate each token's proportion of the total
+        uint256[] memory ratios = new uint256[](balsNoBpt.length);
+        for (uint256 i = 0; i < balsNoBpt.length; i++) {
+            ratios[i] = (_upscale(balsNoBpt[i], _computeScalingFactor(address(tokens[i]))) * RATIO_PRECISION) / total;
         }
 
         return ratios;
@@ -166,5 +357,28 @@ contract BoycoBurrZapTest is Test {
         }
 
         return amountsWithoutBpt;
+    }
+
+    function _dropBptItem(IERC20[] memory tokens, uint256 bptIndex) internal pure returns (IERC20[] memory) {
+        IERC20[] memory tokensWithoutBpt = new IERC20[](tokens.length - 1);
+        for (uint256 i = 0; i < tokensWithoutBpt.length; i++) {
+            tokensWithoutBpt[i] = tokens[i < bptIndex ? i : i + 1];
+        }
+
+        return tokensWithoutBpt;
+    }
+
+    /**
+     * @dev Returns a scaling factor that, when multiplied to a token amount for `token`, normalizes its balance as if
+     * it had 18 decimals.
+     */
+    function _computeScalingFactor(address _token) internal view returns (uint256) {
+        // Tokens that don't implement the `decimals` method are not supported.
+        uint256 tokenDecimals = uint256(IERC20Detailed(_token).decimals());
+        require(tokenDecimals <= 18, "Token decimals must be <= 18");
+
+        // Tokens with more than 18 decimals are not supported.
+        uint256 decimalsDifference = 18 - tokenDecimals;
+        return 1e18 * 10 ** decimalsDifference;
     }
 }

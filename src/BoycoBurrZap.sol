@@ -9,6 +9,42 @@ import {_upscale, _downscaleDown} from "@balancer-labs/v2-solidity-utils/contrac
 import {StablePoolUserData} from "@balancer-labs/v2-interfaces/contracts/pool-stable/StablePoolUserData.sol";
 import {Ownable} from "@balancer-labs/v2-solidity-utils/contracts/openzeppelin/Ownable.sol";
 
+/**
+ * @title BoycoBurrZap
+ * @notice A contract that simplifies the process of joining a ComposableStablePool pool containing NECT, HONEY, and a base token
+ *
+ * @dev This contract:
+ * 1. Accepts a deposit of a base token (e.g., USDC)
+ * 2. Automatically mints the required NECT via Beraborrow's PSM
+ * 3. Mints the required HONEY via HoneyFactory
+ * 4. Joins the pool with the correct proportions based on current balances
+ * 5. Returns LP tokens to the specified recipient
+ *
+ * @notice Trust Assumptions:
+ * - Owner: Can whitelist/revoke addresses that are allowed to use the zap
+ * - Balancer Vault: Trusted to handle token swaps and pool operations
+ * - HoneyFactory: Trusted for HONEY minting and mint rate calculations
+ * - PSM Bond Proxy: Trusted for NECT minting
+ * - Token Approvals: Contract approves max amounts to various protocols at deployment
+ *
+ * @notice Process Flow:
+ * 1. Boyco contract calls deposit() with base token amount and recipient address
+ * 2. Contract calculates required proportions based on current pool balances
+ * 3. Contract mints required NECT and HONEY using deposited base token
+ * 4. Contract executes joinPool operation with exact token amounts
+ * 5. LP tokens are sent directly to specified recipient
+ *
+ * @dev Considerations:
+ * - Assumes the ComposableStablePool has already been initialized
+ * - Assumes this contract has been whitelisted in the Beraborrow PSM
+ * - Assumes Beraborrow's PSM returns 100% of the USDC deposited as NECT (1:1 ratio)
+ * - Only whitelisted addresses can deposit
+ * - All tokens must be present in pool at deployment
+ * - Only supports tokens with <= 18 decimals
+ * - Uses exact tokens in for BPT out to avoid dust
+ */
+
+/// @author BurrBear team
 contract BoycoBurrZap is Ownable {
     // Constants for error messages
     string private constant ERROR_INVALID_RECIPIENT = "Invalid recipient";
@@ -110,7 +146,7 @@ contract BoycoBurrZap is Ownable {
     /////// WHITELISTED /////
     /////////////////////////
 
-    /// @notice Takes a token (e.g. USDC) and mints LP tokens in return
+    /// @notice Takes a token (e.g. USDC) and gives back LP tokens in return
     /// @param _depositAmount Amount of tokens to deposit
     /// @param _recipient Address to receive LP tokens
     function deposit(uint256 _depositAmount, address _recipient) public onlyWhitelisted {
@@ -126,7 +162,7 @@ contract BoycoBurrZap is Ownable {
         uint256[] memory scalingFactors = IComposableStablePool(POOL).getScalingFactors();
 
         // Calculate amounts and validate pool composition
-        uint256[] memory amountsIn = _mintAmounts(
+        uint256[] memory amountsIn = _splitAmounts(
             MintParams({
                 tokens: tokens,
                 balances: balances,
@@ -151,31 +187,39 @@ contract BoycoBurrZap is Ownable {
      * 3. Handles minting of both NECT and HONEY tokens
      * 4. Returns array of token amounts needed for pool join
      */
-    function _mintAmounts(MintParams memory params) private returns (uint256[] memory amountsIn) {
+    function _splitAmounts(MintParams memory params) private returns (uint256[] memory amountsIn) {
         uint256 len = params.balances.length;
         amountsIn = new uint256[](len);
-        // Calculate normalized balances and find token indices
-        (uint256[] memory normBalances, uint256 totalNormBal, uint256 tokenIndex) =
-            _getNormalizedBalancesAndTokenIndex(params.tokens, params.balances, params.scalingFactors, params.bptIndex);
+        uint256 scaledDeposit = _upscale(params.depositAmount, _computeScalingFactor(address(TOKEN)));
 
-        uint256 rateDiff;
+        uint256 tokenIndex = 0;
+        // Calculate total weighted balance
+        uint256 totalWeightedBalance = 0;
+        uint256[] memory weightedBalances = new uint256[](len);
         {
-            // Get and validate honey rate
-            uint256 honeyRate = IHoneyFactory(HONEY_FACTORY).mintRates(TOKEN);
-            require(honeyRate > 0 && honeyRate <= 1e18, ERROR_HONEY_RATE);
-            // Calculate rate difference for proportional joins
-            rateDiff = 1e18 - (((len - 2) * 1e18 + honeyRate) / (len - 1));
+            uint256 honeyIndex = _getHoneyIndex(params.tokens);
+            uint256 honeyMintRate = IHoneyFactory(HONEY_FACTORY).mintRates(TOKEN);
+            for (uint256 i = 0; i < len; i++) {
+                if (i == params.bptIndex) {
+                    continue;
+                }
+                if (address(params.tokens[i]) == TOKEN) {
+                    tokenIndex = i;
+                }
+                uint256 rate = i != honeyIndex ? 1e18 : honeyMintRate;
+                // Convert balance to weighted balance using rates
+                uint256 scaledBalance = _upscale(params.balances[i], params.scalingFactors[i]);
+                uint256 weightedBalance = (scaledBalance * 1e18) / rate;
+                weightedBalances[i] = weightedBalance;
+                totalWeightedBalance += weightedBalance;
+            }
         }
 
-        uint256 scaledDeposit = _upscale(params.depositAmount, _computeScalingFactor(address(TOKEN)));
-        // Calculate final amounts
         for (uint256 i = 0; i < len; i++) {
             if (i == params.bptIndex) {
                 continue;
             }
-            uint256 multiplier = (address(params.tokens[i]) == HONEY) ? 1e18 + (rateDiff * (len - 2)) : 1e18 - rateDiff;
-            uint256 amountIn = (scaledDeposit * normBalances[i] * multiplier) / totalNormBal / 1e18;
-
+            uint256 amountIn = (scaledDeposit * weightedBalances[i]) / totalWeightedBalance;
             if (address(params.tokens[i]) == NECT) {
                 amountsIn[i] = IPSMBondProxy(PSM_BOND_PROXY).deposit(
                     _downscaleDown(amountIn, params.scalingFactors[tokenIndex]), address(this)
@@ -186,33 +230,24 @@ contract BoycoBurrZap is Ownable {
                 );
             }
         }
+
         // for the token amount, we just use the left over balance
         // because joinPool uses EXACT_TOKENS_IN_FOR_BPT_OUT
         // this ensures that the vault will transfer the full amount
         // of all token in the request and there is no dust left
-        // therefore we avoid having to transfer dust back to the user
+        // this avoids having to transfer dust back to the user
         amountsIn[tokenIndex] = IERC20(TOKEN).balanceOf(address(this));
     }
 
-    /// @dev Helper function to get normalized balances
-    function _getNormalizedBalancesAndTokenIndex(
-        IERC20[] memory tokens,
-        uint256[] memory balances,
-        uint256[] memory scalingFactors,
-        uint256 bptIndex
-    ) private view returns (uint256[] memory normBalances, uint256 totalNormBal, uint256 tokenIndex) {
-        uint256 len = balances.length;
-        normBalances = new uint256[](len);
-
+    function _getHoneyIndex(IERC20[] memory tokens) private view returns (uint256) {
+        uint256 len = tokens.length;
         for (uint256 i = 0; i < len; i++) {
-            if (i != bptIndex) {
-                if (address(tokens[i]) == TOKEN) {
-                    tokenIndex = i;
-                }
-                normBalances[i] = _upscale(balances[i], scalingFactors[i]);
-                totalNormBal += normBalances[i];
+            if (address(tokens[i]) == HONEY) {
+                return i;
             }
         }
+        // this should never happen
+        return 0;
     }
 
     /// @dev Executes the pool join transaction
@@ -286,7 +321,6 @@ interface IComposableStablePool {
     function getBptIndex() external view returns (uint256);
     function getPoolId() external view returns (bytes32);
     function getVault() external view returns (address);
-    function getActualSupply() external view returns (uint256);
 }
 
 interface IHoneyFactory {
