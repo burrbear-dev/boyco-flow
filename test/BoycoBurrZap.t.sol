@@ -4,6 +4,7 @@ pragma abicoder v2;
 
 import {Test, console} from "forge-std/Test.sol";
 import "../src/BoycoBurrZap.sol";
+import {TokenArrays} from "./utils/TokenArrays.sol";
 import {IERC20} from "@balancer-labs/v2-interfaces/contracts/solidity-utils/openzeppelin/IERC20.sol";
 import {Math} from "@balancer-labs/v2-solidity-utils/contracts/math/Math.sol";
 
@@ -12,13 +13,18 @@ import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 contract BoycoBurrZapTest is Test {
     // cArtio environment
     address constant VAULT = 0x398D4CFB5D29d18BaA149497656904F2e8814EFb;
+    address constant COMPOSABLE_STABLE_POOL_FACTORY = 0x7B59a632c20B0015548CbF61193476664eB900ab;
     address constant NECT_USDC_HONEY_POOL = 0xFbb99BAD8eca0736A9ab2a7f566dEbC9acb607f0;
     address constant USDC = 0x015fd589F4f1A33ce4487E12714e1B15129c9329;
     address constant HONEY_FACTORY = 0xA81F0019d442f19f66880bcf2698B4E5D5Ec249A;
 
     // ---- BeraBorrow related addresses ----
     address constant NECT = 0xefEeD4d987F6d1dE0f23D116a578402456819C28;
+    // this is a contract that has already been whitelisted by the PSM contract
+    // we use it to etch the BoycoBurrZap contract on top of it
+    // so that we don't have to whitelist it from the PSM contract
     address constant PSM_WHITELISTED = 0xBa8F5f80C41BF5e169d9149Cd4977B1990Fc2736;
+    // this is the PSM contract that we use to deposit USDC and get NECT
     address constant PSM_BOND_PROXY = 0xd064C80776497821313b1Dc0E3192d1a67b2a9fa;
     uint256 constant RATIO_PRECISION = 1e18;
     // 0.001%
@@ -38,7 +44,7 @@ contract BoycoBurrZapTest is Test {
         _dealTokens(address(this));
         _dealTokens(alice);
         _dealTokens(bob);
-        _etchContract(PSM_WHITELISTED);
+        _etchContract(PSM_WHITELISTED, NECT_USDC_HONEY_POOL);
         zap = BoycoBurrZap(PSM_WHITELISTED);
         zap.whitelist(address(this));
     }
@@ -73,20 +79,20 @@ contract BoycoBurrZapTest is Test {
     }
 
     function test_deposit_max() public {
-        _depositAndAssert(MAX_USDC_DEPOSIT);
+        _depositAndAssert(MAX_USDC_DEPOSIT, NECT_USDC_HONEY_POOL);
     }
 
     function test_Fuzz_deposit_max(uint256) public {
         _vaultAproveAllTokens(alice);
         _doRandomSwap(alice);
-        _depositAndAssert(MAX_USDC_DEPOSIT);
+        _depositAndAssert(MAX_USDC_DEPOSIT, NECT_USDC_HONEY_POOL);
     }
 
     function test_Fuzz_deposit(uint256 _usdcAmount) public {
         vm.assume(_usdcAmount > 0 && _usdcAmount < MAX_USDC_DEPOSIT);
         _vaultAproveAllTokens(alice);
         _doRandomSwap(alice);
-        _depositAndAssert(_usdcAmount);
+        _depositAndAssert(_usdcAmount, NECT_USDC_HONEY_POOL);
     }
 
     function test_small_deposits() public {
@@ -124,8 +130,27 @@ contract BoycoBurrZapTest is Test {
         for (uint256 i = 0; i < iterations; i++) {
             _doRandomSwap(alice);
             uint256 depositAmount = vm.randomUint(0, MAX_USDC_DEPOSIT / iterations);
-            _depositAndAssert(depositAmount);
+            _depositAndAssert(depositAmount, NECT_USDC_HONEY_POOL);
         }
+    }
+
+    function test_Fuzz_create_pool_and_deposit(uint256 _usdcAmount) public {
+        vm.assume(_usdcAmount > 1e6 && _usdcAmount < MAX_USDC_DEPOSIT);
+        _vaultAproveAllTokens(alice);
+        address pool = _deployCSP(
+            COMPOSABLE_STABLE_POOL_FACTORY,
+            "test",
+            USDC,
+            NECT,
+            IHoneyFactory(HONEY_FACTORY).honey()
+        );
+        _initCSP(VAULT, pool);
+
+        _etchContract(PSM_WHITELISTED, pool);
+        zap = BoycoBurrZap(PSM_WHITELISTED);
+        zap.whitelist(address(this));
+
+        _depositAndAssert(_usdcAmount, pool);
     }
 
     function _doRandomSwap(address _user) internal {
@@ -164,8 +189,8 @@ contract BoycoBurrZapTest is Test {
         return _dropBptItem(bals, bptIndex);
     }
 
-    function _depositAndAssert(uint256 _usdcAmount) internal {
-        uint256[] memory balsNoBptPre = _getBalsNoBpt(NECT_USDC_HONEY_POOL);
+    function _depositAndAssert(uint256 _usdcAmount, address _pool) internal {
+        uint256[] memory balsNoBptPre = _getBalsNoBpt(_pool);
         // approve zap to spend USDC
         IERC20(USDC).approve(address(zap), _usdcAmount);
         // deposit USDC
@@ -173,9 +198,9 @@ contract BoycoBurrZapTest is Test {
         // ensure zap has no tokens balance
         _ensureNoZapBalance(zap);
         // ensure LP tokens are minted
-        _ensureLpTokensMinted(NECT_USDC_HONEY_POOL, address(this));
+        _ensureLpTokensMinted(_pool, address(this));
         // ensure ratios are within tolerance
-        _ensureRatiosWithinTolerance(balsNoBptPre, _getBalsNoBpt(NECT_USDC_HONEY_POOL));
+        _ensureRatiosWithinTolerance(balsNoBptPre, _getBalsNoBpt(_pool));
     }
 
     function _vaultAproveAllTokens(address _user) internal {
@@ -220,12 +245,97 @@ contract BoycoBurrZapTest is Test {
         vm.stopPrank();
     }
 
+    function _deployCSP(
+        address cstFactory,
+        string memory _name,
+        address _token0,
+        address _token1,
+        address _token2
+    ) private returns (address) {
+        address[] memory tokens = TokenArrays.createThreeTokenArray(_token0, _token1, _token2, true);
+
+        uint256[] memory tokenRateCacheDurations = new uint256[](3);
+        tokenRateCacheDurations[0] = 10800;
+        tokenRateCacheDurations[1] = 10800;
+        tokenRateCacheDurations[2] = 10800;
+
+        bytes32 salt = keccak256(vm.randomBytes(32));
+
+        address csp = IComposableStablePoolFactory(cstFactory).create(
+            _name,
+            _name,
+            tokens,
+            200,
+            TokenArrays.createThreeTokenArray(address(0), address(0), address(0), true),
+            tokenRateCacheDurations,
+            false,
+            500000000000000,
+            address(this),
+            salt
+        );
+
+        console.log("pool address: ", csp);
+        (address poolAddressInVault, ) = IVault(IComposableStablePool(csp).getVault()).getPool(
+            (IComposableStablePool(csp).getPoolId())
+        );
+
+        console.log("poolAddressInVault: ", poolAddressInVault);
+
+        return csp;
+    }
+
+    function _initCSP(address vault, address pool) internal {
+        bytes32 poolId = IComposableStablePool(pool).getPoolId();
+        // Tokens and amounts
+        (IERC20[] memory tokens, uint256[] memory amounts, ) = IVault(vault).getPoolTokens(poolId);
+        // Get BPT index from the pool
+        uint256 bptIndex = IComposableStablePool(pool).getBptIndex();
+        uint256 len = tokens.length;
+
+        uint256[] memory maxAmountsIn = new uint256[](len);
+        uint256 sortedTokensIndex = 0;
+        for (uint256 i = 0; i < len; i++) {
+            maxAmountsIn[i] = type(uint256).max;
+            if (i == bptIndex) {
+                continue;
+            }
+            uint256 min = 10 ** uint256(IERC20Detailed(address(tokens[i])).decimals());
+            uint256 max = min * 1e13;
+
+            amounts[i] = vm.randomUint(min, max);
+
+            if (amounts[i] > 0) {
+                tokens[i].approve(vault, amounts[i]);
+            }
+            sortedTokensIndex++;
+        }
+
+        IVault(vault).joinPool(
+            poolId,
+            address(this),
+            address(this),
+            IVault.JoinPoolRequest({
+                assets: _asIAsset(tokens),
+                maxAmountsIn: maxAmountsIn,
+                userData: abi.encode(StablePoolUserData.JoinKind.INIT, amounts),
+                fromInternalBalance: false
+            })
+        );
+    }
+
+    function _asIAsset(IERC20[] memory addresses) internal pure returns (IAsset[] memory assets) {
+        // solhint-disable-next-line no-inline-assembly
+        assembly {
+            assets := addresses
+        }
+    }
+
     function _ensureRatiosWithinTolerance(uint256[] memory _balsPre, uint256[] memory _balsPost) internal view {
         (bool withinTolerance, uint256 ratioDiff) = _isRatiosWithinTolerance(_balsPre, _balsPost);
         if (!withinTolerance) {
             _logArray(_balsPre, "BalsPre");
             _logArray(_balsPost, "BalsPost");
-            assertLt(ratioDiff, RATIO_TOLERANCE, "Ratio should be within 0.1%");
+            assertLt(ratioDiff, RATIO_TOLERANCE, "Ratio should be within 0.001%");
         }
     }
 
@@ -287,14 +397,16 @@ contract BoycoBurrZapTest is Test {
         assertEq(IERC20(NECT_USDC_HONEY_POOL).balanceOf(address(_zap)), 0, "Zap should have no LP tokens balance");
     }
 
-    function _etchContract(address _target) internal {
-        zap = new BoycoBurrZap(USDC, NECT_USDC_HONEY_POOL, HONEY_FACTORY, NECT, PSM_BOND_PROXY);
+    /// @dev Etches the BoycoBurrZap contract on top of an already
+    /// whitelisted contract
+    function _etchContract(address _target, address _pool) internal {
+        zap = new BoycoBurrZap(USDC, _pool, HONEY_FACTORY, NECT, PSM_BOND_PROXY);
 
         // make this contract whitelisted for PSM
         vm.etch(_target, getCode(address(zap)));
 
         // fix ownership
-        vm.startPrank(address(0));
+        vm.startPrank(BoycoBurrZap(_target).owner());
         BoycoBurrZap(_target).transferOwnership(address(this));
         vm.stopPrank();
 
@@ -303,6 +415,8 @@ contract BoycoBurrZapTest is Test {
         // all token approvals will be lost therefore we need to approve the tokens
         // again for the new address
         address _honey = IHoneyFactory(HONEY_FACTORY).honey();
+        // here we impersonate the target contract to simulate token approvals
+        // coming from it
         vm.startPrank(_target);
         IERC20(USDC).approve(PSM_BOND_PROXY, type(uint256).max);
         // at deployment time of this contract USDC might not
@@ -312,29 +426,7 @@ contract BoycoBurrZapTest is Test {
         IERC20(USDC).approve(VAULT, type(uint256).max);
         IERC20(NECT).approve(VAULT, type(uint256).max);
         IERC20(_honey).approve(VAULT, type(uint256).max);
-
         vm.stopPrank();
-    }
-
-    function _getPoolTokenRatios(address _pool) internal view returns (uint256[] memory) {
-        bytes32 poolId = IComposableStablePool(_pool).getPoolId();
-        (IERC20[] memory tokens, uint256[] memory bals, ) = IVault(VAULT).getPoolTokens(poolId);
-        uint256 bptIndex = IComposableStablePool(_pool).getBptIndex();
-        uint256[] memory balsNoBpt = _dropBptItem(bals, bptIndex);
-
-        // Calculate total balance
-        uint256 total = 0;
-        for (uint256 i = 0; i < balsNoBpt.length; i++) {
-            total += _upscale(balsNoBpt[i], _computeScalingFactor(address(tokens[i])));
-        }
-
-        // Calculate each token's proportion of the total
-        uint256[] memory ratios = new uint256[](balsNoBpt.length);
-        for (uint256 i = 0; i < balsNoBpt.length; i++) {
-            ratios[i] = (_upscale(balsNoBpt[i], _computeScalingFactor(address(tokens[i]))) * RATIO_PRECISION) / total;
-        }
-
-        return ratios;
     }
 
     function getCode(address who) internal view returns (bytes memory o_code) {
@@ -388,4 +480,25 @@ contract BoycoBurrZapTest is Test {
         uint256 decimalsDifference = 18 - tokenDecimals;
         return 1e18 * 10 ** decimalsDifference;
     }
+}
+
+interface IComposableStablePoolFactory {
+    function getVault() external view returns (IVault);
+
+    function version() external view returns (string memory);
+
+    function getPoolVersion() external view returns (string memory);
+
+    function create(
+        string memory name,
+        string memory symbol,
+        address[] memory tokens,
+        uint256 amplificationParameter,
+        address[] memory rateProviders,
+        uint256[] memory tokenRateCacheDurations,
+        bool exemptFromYieldProtocolFeeFlags,
+        uint256 swapFeePercentage,
+        address owner,
+        bytes32 salt
+    ) external returns (address);
 }
