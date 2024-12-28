@@ -140,7 +140,7 @@ contract BoycoBurrZapTest is Test {
         _vaultAproveAllTokens(alice);
         address pool =
             _deployCSP(COMPOSABLE_STABLE_POOL_FACTORY, "test", USDC, NECT, IHoneyFactory(HONEY_FACTORY).honey());
-        _initCSP(VAULT, pool);
+        _initCSP(alice, VAULT, pool);
 
         _etchContract(PSM_WHITELISTED, pool);
         zap = BoycoBurrZap(PSM_WHITELISTED);
@@ -267,21 +267,18 @@ contract BoycoBurrZapTest is Test {
             salt
         );
 
-        console.log("pool address: ", csp);
-        (address poolAddressInVault,) =
-            IVault(IComposableStablePool(csp).getVault()).getPool((IComposableStablePool(csp).getPoolId()));
-
-        console.log("poolAddressInVault: ", poolAddressInVault);
+        (address poolAddressInVault,) = IVault(VAULT).getPool((IComposableStablePool(csp).getPoolId()));
+        assertEq(poolAddressInVault, csp, "Pool address in vault should be the same as the created pool");
 
         return csp;
     }
 
-    function _initCSP(address vault, address pool) internal {
-        bytes32 poolId = IComposableStablePool(pool).getPoolId();
+    function _initCSP(address _user, address _vault, address _pool) internal {
+        bytes32 poolId = IComposableStablePool(_pool).getPoolId();
         // Tokens and amounts
-        (IERC20[] memory tokens, uint256[] memory amounts,) = IVault(vault).getPoolTokens(poolId);
+        (IERC20[] memory tokens, uint256[] memory amounts,) = IVault(_vault).getPoolTokens(poolId);
         // Get BPT index from the pool
-        uint256 bptIndex = IComposableStablePool(pool).getBptIndex();
+        uint256 bptIndex = IComposableStablePool(_pool).getBptIndex();
         uint256 len = tokens.length;
 
         uint256[] memory maxAmountsIn = new uint256[](len);
@@ -297,15 +294,16 @@ contract BoycoBurrZapTest is Test {
             amounts[i] = vm.randomUint(min, max);
 
             if (amounts[i] > 0) {
-                tokens[i].approve(vault, amounts[i]);
+                tokens[i].approve(_vault, amounts[i]);
             }
             sortedTokensIndex++;
         }
 
-        IVault(vault).joinPool(
+        vm.startPrank(_user);
+        IVault(_vault).joinPool(
             poolId,
-            address(this),
-            address(this),
+            _user,
+            _user,
             IVault.JoinPoolRequest({
                 assets: _asIAsset(tokens),
                 maxAmountsIn: maxAmountsIn,
@@ -313,6 +311,7 @@ contract BoycoBurrZapTest is Test {
                 fromInternalBalance: false
             })
         );
+        vm.stopPrank();
     }
 
     function _asIAsset(IERC20[] memory addresses) internal pure returns (IAsset[] memory assets) {
