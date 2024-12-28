@@ -11,12 +11,11 @@ library TokenArrays {
         return isSort ? sortTokenArray(tokenArray) : tokenArray;
     }
 
-    function createThreeTokenArray(
-        address _t0,
-        address _t1,
-        address _t2,
-        bool isSort
-    ) internal pure returns (address[] memory) {
+    function createThreeTokenArray(address _t0, address _t1, address _t2, bool isSort)
+        internal
+        pure
+        returns (address[] memory)
+    {
         address[] memory tokenArray = new address[](3);
         tokenArray[0] = _t0;
         tokenArray[1] = _t1;
@@ -26,7 +25,7 @@ library TokenArrays {
     }
 
     function sortTokenArray(address[] memory _tokenArray) internal pure returns (address[] memory) {
-        for (uint i = 0; i < _tokenArray.length - 1; i++) {
+        for (uint256 i = 0; i < _tokenArray.length - 1; i++) {
             if (_tokenArray[i] > _tokenArray[i + 1]) {
                 (_tokenArray[i], _tokenArray[i + 1]) = (_tokenArray[i + 1], _tokenArray[i]);
             }

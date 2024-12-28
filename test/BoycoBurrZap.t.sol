@@ -111,7 +111,8 @@ contract BoycoBurrZapTest is Test {
             uint256 lpBalPre = IERC20(NECT_USDC_HONEY_POOL).balanceOf(address(this));
             IERC20(USDC).approve(address(zap), i);
             // deposit
-            try zap.deposit(i, address(this)) {} catch (bytes memory reason) {
+            try zap.deposit(i, address(this)) {}
+            catch (bytes memory reason) {
                 if (keccak256(abi.encodePacked(reason)) != bal003Hash) {
                     revert(string(reason));
                 }
@@ -137,13 +138,8 @@ contract BoycoBurrZapTest is Test {
     function test_Fuzz_create_pool_and_deposit(uint256 _usdcAmount) public {
         vm.assume(_usdcAmount > 1e6 && _usdcAmount < MAX_USDC_DEPOSIT);
         _vaultAproveAllTokens(alice);
-        address pool = _deployCSP(
-            COMPOSABLE_STABLE_POOL_FACTORY,
-            "test",
-            USDC,
-            NECT,
-            IHoneyFactory(HONEY_FACTORY).honey()
-        );
+        address pool =
+            _deployCSP(COMPOSABLE_STABLE_POOL_FACTORY, "test", USDC, NECT, IHoneyFactory(HONEY_FACTORY).honey());
         _initCSP(VAULT, pool);
 
         _etchContract(PSM_WHITELISTED, pool);
@@ -155,7 +151,7 @@ contract BoycoBurrZapTest is Test {
 
     function _doRandomSwap(address _user) internal {
         bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
-        (IERC20[] memory tokens, uint256[] memory bals, ) = IVault(VAULT).getPoolTokens(poolId);
+        (IERC20[] memory tokens, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
         uint256 bptIndex = IComposableStablePool(NECT_USDC_HONEY_POOL).getBptIndex();
         IERC20[] memory tokensNoBpt = _dropBptItem(tokens, bptIndex);
         uint256 tokensLen = tokensNoBpt.length;
@@ -174,7 +170,7 @@ contract BoycoBurrZapTest is Test {
 
     function _print_pool_balances() internal view {
         bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
-        (, uint256[] memory bals, ) = IVault(VAULT).getPoolTokens(poolId);
+        (, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
         uint256 bptIndex = IComposableStablePool(NECT_USDC_HONEY_POOL).getBptIndex();
         uint256[] memory balsNoBpt = _dropBptItem(bals, bptIndex);
         console.log("balances[0]", balsNoBpt[0]);
@@ -184,7 +180,7 @@ contract BoycoBurrZapTest is Test {
 
     function _getBalsNoBpt(address _pool) internal view returns (uint256[] memory) {
         bytes32 poolId = IComposableStablePool(_pool).getPoolId();
-        (, uint256[] memory bals, ) = IVault(VAULT).getPoolTokens(poolId);
+        (, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
         uint256 bptIndex = IComposableStablePool(_pool).getBptIndex();
         return _dropBptItem(bals, bptIndex);
     }
@@ -245,13 +241,10 @@ contract BoycoBurrZapTest is Test {
         vm.stopPrank();
     }
 
-    function _deployCSP(
-        address cstFactory,
-        string memory _name,
-        address _token0,
-        address _token1,
-        address _token2
-    ) private returns (address) {
+    function _deployCSP(address cstFactory, string memory _name, address _token0, address _token1, address _token2)
+        private
+        returns (address)
+    {
         address[] memory tokens = TokenArrays.createThreeTokenArray(_token0, _token1, _token2, true);
 
         uint256[] memory tokenRateCacheDurations = new uint256[](3);
@@ -275,9 +268,8 @@ contract BoycoBurrZapTest is Test {
         );
 
         console.log("pool address: ", csp);
-        (address poolAddressInVault, ) = IVault(IComposableStablePool(csp).getVault()).getPool(
-            (IComposableStablePool(csp).getPoolId())
-        );
+        (address poolAddressInVault,) =
+            IVault(IComposableStablePool(csp).getVault()).getPool((IComposableStablePool(csp).getPoolId()));
 
         console.log("poolAddressInVault: ", poolAddressInVault);
 
@@ -287,7 +279,7 @@ contract BoycoBurrZapTest is Test {
     function _initCSP(address vault, address pool) internal {
         bytes32 poolId = IComposableStablePool(pool).getPoolId();
         // Tokens and amounts
-        (IERC20[] memory tokens, uint256[] memory amounts, ) = IVault(vault).getPoolTokens(poolId);
+        (IERC20[] memory tokens, uint256[] memory amounts,) = IVault(vault).getPoolTokens(poolId);
         // Get BPT index from the pool
         uint256 bptIndex = IComposableStablePool(pool).getBptIndex();
         uint256 len = tokens.length;
@@ -339,15 +331,16 @@ contract BoycoBurrZapTest is Test {
         }
     }
 
-    function _isRatiosWithinTolerance(
-        uint256[] memory _balsPre,
-        uint256[] memory _balsPost
-    ) internal view returns (bool, uint256) {
+    function _isRatiosWithinTolerance(uint256[] memory _balsPre, uint256[] memory _balsPost)
+        internal
+        view
+        returns (bool, uint256)
+    {
         uint256 ratioDiff;
         uint256 totalPre = 0;
         uint256 totalPost = 0;
         bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
-        (IERC20[] memory tokens, , ) = IVault(VAULT).getPoolTokens(poolId);
+        (IERC20[] memory tokens,,) = IVault(VAULT).getPoolTokens(poolId);
         uint256 bptIndex = IComposableStablePool(NECT_USDC_HONEY_POOL).getBptIndex();
         for (uint256 i = 0; i < tokens.length; i++) {
             if (i == bptIndex) {
@@ -361,10 +354,10 @@ contract BoycoBurrZapTest is Test {
             if (i == bptIndex) {
                 continue;
             }
-            uint256 ratioPre = (_upscale(_balsPre[i], _computeScalingFactor(address(tokens[i]))) * RATIO_PRECISION) /
-                totalPre;
-            uint256 ratioPost = (_upscale(_balsPost[i], _computeScalingFactor(address(tokens[i]))) * RATIO_PRECISION) /
-                totalPost;
+            uint256 ratioPre =
+                (_upscale(_balsPre[i], _computeScalingFactor(address(tokens[i]))) * RATIO_PRECISION) / totalPre;
+            uint256 ratioPost =
+                (_upscale(_balsPost[i], _computeScalingFactor(address(tokens[i]))) * RATIO_PRECISION) / totalPost;
             ratioDiff = Math.abs(int256(ratioPre - ratioPost));
             if (ratioDiff >= RATIO_TOLERANCE) {
                 return (false, ratioDiff);
@@ -390,9 +383,7 @@ contract BoycoBurrZapTest is Test {
         assertEq(IERC20(USDC).balanceOf(address(_zap)), 0, "Zap should have no USDC balance");
         assertEq(IERC20(NECT).balanceOf(address(_zap)), 0, "Zap should have no NECT balance");
         assertEq(
-            IERC20(IHoneyFactory(HONEY_FACTORY).honey()).balanceOf(address(_zap)),
-            0,
-            "Zap should have no HONEY balance"
+            IERC20(IHoneyFactory(HONEY_FACTORY).honey()).balanceOf(address(_zap)), 0, "Zap should have no HONEY balance"
         );
         assertEq(IERC20(NECT_USDC_HONEY_POOL).balanceOf(address(_zap)), 0, "Zap should have no LP tokens balance");
     }

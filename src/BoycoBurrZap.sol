@@ -112,7 +112,7 @@ contract BoycoBurrZap is Ownable {
 
         // ensure all tokens are present in the pool
         bytes32 poolId = IComposableStablePool(_pool).getPoolId();
-        (IERC20[] memory tokens, , ) = IVault(_vault).getPoolTokens(poolId);
+        (IERC20[] memory tokens,,) = IVault(_vault).getPoolTokens(poolId);
         bool honeyInPool = false;
         bool tokenInPool = false;
         bool nectInPool = false;
@@ -159,7 +159,7 @@ contract BoycoBurrZap is Ownable {
 
         // Get pool information
         bytes32 poolId = IComposableStablePool(POOL).getPoolId();
-        (IERC20[] memory tokens, uint256[] memory balances, ) = IVault(VAULT).getPoolTokens(poolId);
+        (IERC20[] memory tokens, uint256[] memory balances,) = IVault(VAULT).getPoolTokens(poolId);
         uint256 bptIndex = IComposableStablePool(POOL).getBptIndex();
         uint256[] memory scalingFactors = IComposableStablePool(POOL).getScalingFactors();
 
@@ -224,15 +224,11 @@ contract BoycoBurrZap is Ownable {
             uint256 amountIn = (scaledDeposit * weightedBalances[i]) / totalWeightedBalance;
             if (address(params.tokens[i]) == NECT) {
                 amountsIn[i] = IPSMBondProxy(PSM_BOND_PROXY).deposit(
-                    _downscaleDown(amountIn, params.scalingFactors[tokenIndex]),
-                    address(this)
+                    _downscaleDown(amountIn, params.scalingFactors[tokenIndex]), address(this)
                 );
             } else if (address(params.tokens[i]) == HONEY) {
                 amountsIn[i] = IHoneyFactory(HONEY_FACTORY).mint(
-                    TOKEN,
-                    _downscaleDown(amountIn, params.scalingFactors[tokenIndex]),
-                    address(this),
-                    false
+                    TOKEN, _downscaleDown(amountIn, params.scalingFactors[tokenIndex]), address(this), false
                 );
             }
         }
@@ -277,9 +273,7 @@ contract BoycoBurrZap is Ownable {
                 assets: _asIAsset(tokens),
                 maxAmountsIn: maxAmountsIn,
                 userData: abi.encode(
-                    StablePoolUserData.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT,
-                    _dropBptItem(amountsIn, bptIndex),
-                    0
+                    StablePoolUserData.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT, _dropBptItem(amountsIn, bptIndex), 0
                 ),
                 fromInternalBalance: false
             })
