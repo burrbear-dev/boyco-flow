@@ -35,6 +35,7 @@ import {Ownable} from "@balancer-labs/v2-solidity-utils/contracts/openzeppelin/O
  * 5. LP tokens are sent directly to specified recipient
  *
  * @dev Considerations:
+ * - @TODO add liquidity to the pool proportional and no oracles involved
  * - Assumes the ComposableStablePool has already been initialized
  * - Assumes this contract has been whitelisted in the Beraborrow PSM
  * - Assumes Beraborrow's PSM returns 100% of the USDC deposited as NECT (1:1 ratio)
@@ -53,6 +54,7 @@ contract BoycoBurrZap is Ownable {
     string private constant ERROR_HONEY_RATE = "Invalid honey rate";
     string private constant ERROR_DECIMALS = "Token decimals > 18";
     string private constant ERROR_NOT_WHITELISTED = "Not whitelisted";
+    string private constant ERROR_HONEY_NOT_IN_POOL = "HONEY not in pool";
 
     // ---- Immutable state variables ----
     address public immutable TOKEN;
@@ -121,7 +123,7 @@ contract BoycoBurrZap is Ownable {
             else if (address(tokens[i]) == _token) tokenInPool = true;
             else if (address(tokens[i]) == _nect) nectInPool = true;
         }
-        require(honeyInPool && tokenInPool && nectInPool, "Pool must have HONEY, TOKEN, and NECT");
+        require(honeyInPool && tokenInPool && nectInPool, ERROR_TOKEN_NOT_IN_POOL);
 
         // Set approvals once at deployment
         IERC20(_token).approve(_pBondProxy, type(uint256).max);
@@ -249,6 +251,8 @@ contract BoycoBurrZap is Ownable {
             }
         }
         // this should never happen
+        require(false, ERROR_HONEY_NOT_IN_POOL);
+        // silence the compiler warnings
         return 0;
     }
 
