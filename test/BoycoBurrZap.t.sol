@@ -26,24 +26,37 @@ contract BoycoBurrZapTest is Test {
     address constant PSM_WHITELISTED = 0xBa8F5f80C41BF5e169d9149Cd4977B1990Fc2736;
     // this is the PSM contract that we use to deposit USDC and get NECT
     address constant PSM_BOND_PROXY = 0xd064C80776497821313b1Dc0E3192d1a67b2a9fa;
-    uint256 constant RATIO_PRECISION = 1e18;
+    uint256 constant PRECISION = 1e18;
     // 0.001%
     uint256 constant RATIO_TOLERANCE = 1e13;
     // 1e13 is 100 trillion
     uint256 constant MAX_USDC_DEPOSIT = 1e6 * 1e13;
+    uint256 constant MAX_NECT_HONEY_AMOUNTS = 1e18 * 1e13;
+    // 10% in 1e18 precision
+    uint256 constant PROFIT_TOLERANCE = 1e17;
 
     BoycoBurrZap zap;
     address alice;
     address bob;
+    address carol;
+
+    struct UserBalances {
+        uint256 usdc;
+        uint256 nect;
+        uint256 honey;
+        uint256 lp;
+    }
 
     function setUp() public {
         vm.createSelectFork("https://rockbeard-eth-cartio.berachain.com", 2399510);
 
         alice = makeAddr("alice");
         bob = makeAddr("bob");
+        carol = makeAddr("carol");
         _dealTokens(address(this));
         _dealTokens(alice);
         _dealTokens(bob);
+        _dealTokens(carol);
         _etchContract(PSM_WHITELISTED, NECT_USDC_HONEY_POOL);
         zap = BoycoBurrZap(PSM_WHITELISTED);
         zap.whitelist(address(this));
@@ -76,6 +89,10 @@ contract BoycoBurrZapTest is Test {
     function test_deposit_0() public {
         vm.expectRevert("Invalid deposit amount");
         zap.deposit(0, address(this));
+    }
+
+    function test_deposit_1USDC() public {
+        _depositAndAssert(1e6, NECT_USDC_HONEY_POOL);
     }
 
     function test_deposit_max() public {
@@ -149,6 +166,79 @@ contract BoycoBurrZapTest is Test {
         _depositAndAssert(_usdcAmount, pool);
     }
 
+    function _test_price_manipulation(uint256 _depositAmount, uint256 _bobNectSwap, uint256 _aliceDeposit) public {
+        // bob manipulates the price of NECT/USDC by swapping NECT -> USDC
+        console.log("bob swaps NECT -> USDC", _bobNectSwap);
+        UserBalances memory bobBalancesPre = _snapshot_user_balances(bob);
+        _swap(NECT_USDC_HONEY_POOL, bob, _bobNectSwap, address(NECT), address(USDC));
+        UserBalances memory bobBalancesPost = _snapshot_user_balances(bob);
+        uint256 bobUSDCSwap = bobBalancesPost.usdc - bobBalancesPre.usdc;
+
+        // whitelist alice so she can call deposit
+        zap.whitelist(alice);
+        vm.startPrank(alice);
+        console.log("alice deposits USDC", _aliceDeposit);
+        IERC20(USDC).approve(address(zap), _aliceDeposit);
+        // deposit USDC
+        console.log("========================= Alice deposit start =================");
+        zap.deposit(_aliceDeposit, alice);
+        console.log("========================= Alice deposit end =================");
+        vm.stopPrank();
+
+        // bob swaps back: USDC -> NECT
+        console.log("bob swaps USDC -> NECT", bobUSDCSwap);
+        _swap(NECT_USDC_HONEY_POOL, bob, bobUSDCSwap, address(USDC), address(NECT));
+        UserBalances memory bobBalancesPost2 = _snapshot_user_balances(bob);
+
+        if (bobBalancesPost2.usdc > bobBalancesPre.usdc) {
+            console.log("bob made USDC profit", bobBalancesPost2.usdc - bobBalancesPre.usdc);
+        } else {
+            console.log("bob made USDC loss", bobBalancesPre.usdc - bobBalancesPost2.usdc);
+        }
+
+        if (bobBalancesPost2.nect > bobBalancesPre.nect) {
+            console.log("========================= Bob NECT profit =================");
+            console.log("bobBalancesPre.nect\t", bobBalancesPre.nect);
+            console.log("bobBalancesPost2.nect\t", bobBalancesPost2.nect);
+            console.log("bob made NECT profit", bobBalancesPost2.nect - bobBalancesPre.nect);
+
+            // Bob's profit is Alice's loss and vice versa
+            uint256 bobProfit = bobBalancesPost2.nect - bobBalancesPre.nect;
+            console.log("bobProfit NECT profit", bobProfit);
+            uint256 profitRatio =
+                (bobProfit * PRECISION) / _upscale(_aliceDeposit, _computeScalingFactor(address(USDC)));
+            console.log("profitRatio", profitRatio);
+
+            assertLt(profitRatio, PROFIT_TOLERANCE, "bob should have made less than 10% profit");
+        } else {
+            console.log("bob made NECT loss", bobBalancesPre.nect - bobBalancesPost2.nect);
+        }
+        // ensure bob made no USDC profit
+        assertEq(bobBalancesPost2.usdc, bobBalancesPre.usdc, "bob should have the same USDC balance");
+        // ensure bob's honey balance didn't change
+        assertEq(bobBalancesPost2.honey, bobBalancesPre.honey, "bob's honey balance should be the same");
+    }
+
+    function test_Fuzz_price_manipulation(uint256 _depositAmount) public {
+        vm.assume(_depositAmount > 1e6 && _depositAmount < MAX_USDC_DEPOSIT);
+
+        console.log("deposit amount", _depositAmount);
+        _vaultAproveAllTokens(alice);
+        _vaultAproveAllTokens(bob);
+        _vaultAproveAllTokens(carol);
+        // deposit some USDC into the pool
+        _depositAndAssert(_depositAmount, NECT_USDC_HONEY_POOL);
+        // imbalance the pool
+        _doRandomSwap(carol);
+
+        bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
+        (IERC20[] memory tokens, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
+        uint256 nectIndex = _getTokenIndex(tokens, NECT);
+        uint256 swapAmt = vm.randomUint(1, 3 * bals[nectIndex]);
+        uint256 aliceDeposit = vm.randomUint(1e6, _depositAmount);
+        _test_price_manipulation(_depositAmount, swapAmt, aliceDeposit);
+    }
+
     function _doRandomSwap(address _user) internal {
         bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
         (IERC20[] memory tokens, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
@@ -169,13 +259,27 @@ contract BoycoBurrZapTest is Test {
     }
 
     function _print_pool_balances() internal view {
+        uint256[] memory balsNoBpt = _snapshot_pool_balances();
+        console.log("balances[0]", balsNoBpt[0]);
+        console.log("balances[1]", balsNoBpt[1]);
+        console.log("balances[2]", balsNoBpt[2]);
+    }
+
+    function _snapshot_pool_balances() internal view returns (uint256[] memory) {
         bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
         (, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
         uint256 bptIndex = IComposableStablePool(NECT_USDC_HONEY_POOL).getBptIndex();
         uint256[] memory balsNoBpt = _dropBptItem(bals, bptIndex);
-        console.log("balances[0]", balsNoBpt[0]);
-        console.log("balances[1]", balsNoBpt[1]);
-        console.log("balances[2]", balsNoBpt[2]);
+        return balsNoBpt;
+    }
+
+    function _snapshot_user_balances(address _user) internal view returns (UserBalances memory) {
+        UserBalances memory balances;
+        balances.usdc = IERC20(USDC).balanceOf(_user);
+        balances.nect = IERC20(NECT).balanceOf(_user);
+        balances.honey = IERC20(IHoneyFactory(HONEY_FACTORY).honey()).balanceOf(_user);
+        balances.lp = IERC20(NECT_USDC_HONEY_POOL).balanceOf(_user);
+        return balances;
     }
 
     function _getBalsNoBpt(address _pool) internal view returns (uint256[] memory) {
@@ -239,6 +343,19 @@ contract BoycoBurrZapTest is Test {
             99999999999999999 // block number / timestamp
         );
         vm.stopPrank();
+    }
+
+    function _getTokenIndex(IERC20[] memory tokens, address _token) private pure returns (uint256) {
+        uint256 len = tokens.length;
+        for (uint256 i = 0; i < len; i++) {
+            if (address(tokens[i]) == _token) {
+                return i;
+            }
+        }
+        // this should never happen
+        require(false, "Token not found in pool");
+        // silence the compiler warnings
+        return 0;
     }
 
     function _deployCSP(address cstFactory, string memory _name, address _token0, address _token1, address _token2)
@@ -353,10 +470,9 @@ contract BoycoBurrZapTest is Test {
             if (i == bptIndex) {
                 continue;
             }
-            uint256 ratioPre =
-                (_upscale(_balsPre[i], _computeScalingFactor(address(tokens[i]))) * RATIO_PRECISION) / totalPre;
+            uint256 ratioPre = (_upscale(_balsPre[i], _computeScalingFactor(address(tokens[i]))) * PRECISION) / totalPre;
             uint256 ratioPost =
-                (_upscale(_balsPost[i], _computeScalingFactor(address(tokens[i]))) * RATIO_PRECISION) / totalPost;
+                (_upscale(_balsPost[i], _computeScalingFactor(address(tokens[i]))) * PRECISION) / totalPost;
             ratioDiff = Math.abs(int256(ratioPre - ratioPost));
             if (ratioDiff >= RATIO_TOLERANCE) {
                 return (false, ratioDiff);
