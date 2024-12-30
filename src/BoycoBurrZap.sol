@@ -8,6 +8,8 @@ import {IERC20} from "@balancer-labs/v2-interfaces/contracts/solidity-utils/open
 import {_upscale, _downscaleDown} from "@balancer-labs/v2-solidity-utils/contracts/helpers/ScalingHelpers.sol";
 import {StablePoolUserData} from "@balancer-labs/v2-interfaces/contracts/pool-stable/StablePoolUserData.sol";
 import {Ownable} from "@balancer-labs/v2-solidity-utils/contracts/openzeppelin/Ownable.sol";
+import {IBalancerQueries} from "@balancer-labs/v2-interfaces/contracts/standalone-utils/IBalancerQueries.sol";
+import {console} from "forge-std/Test.sol";
 
 /**
  * @title BoycoBurrZap
@@ -76,6 +78,7 @@ contract BoycoBurrZap is Ownable {
     }
 
     struct MintParams {
+        bytes32 poolId;
         IERC20[] tokens;
         uint256[] balances;
         uint256[] scalingFactors;
@@ -166,8 +169,9 @@ contract BoycoBurrZap is Ownable {
         uint256[] memory scalingFactors = IComposableStablePool(POOL).getScalingFactors();
 
         // Calculate amounts and validate pool composition
-        uint256[] memory amountsIn = _splitAmounts(
+        (uint256 bptOut, uint256[] memory amountsIn) = _splitAmounts(
             MintParams({
+                poolId: poolId,
                 tokens: tokens,
                 balances: balances,
                 scalingFactors: scalingFactors,
@@ -175,9 +179,38 @@ contract BoycoBurrZap is Ownable {
                 depositAmount: _depositAmount
             })
         );
+
+        console.log("[deposit] amountsIn[0]", amountsIn[0]);
+        console.log("[deposit] amountsIn[1]", amountsIn[1]);
+        console.log("[deposit] amountsIn[2]", amountsIn[2]);
+
+        console.log("[deposit] USDC Balance", IERC20(TOKEN).balanceOf(address(this)));
+        console.log("[deposit] NECT Balance", IERC20(NECT).balanceOf(address(this)));
+        console.log("[deposit] HONEY Balance", IERC20(HONEY).balanceOf(address(this)));
         // Execute join pool transaction
-        _joinPool(poolId, tokens, amountsIn, bptIndex, _recipient);
+        _joinPool(poolId, tokens, amountsIn, bptOut, _recipient);
+        uint256 tokenLeft = IERC20(TOKEN).balanceOf(address(this));
+        if (tokenLeft > 0) {
+            IERC20(TOKEN).transfer(_recipient, tokenLeft);
+        }
+        uint256 nectLeft = IERC20(NECT).balanceOf(address(this));
+        if (nectLeft > 0) {
+            IERC20(NECT).transfer(_recipient, nectLeft);
+        }
+        uint256 honeyLeft = IERC20(HONEY).balanceOf(address(this));
+        if (honeyLeft > 0) {
+            IERC20(HONEY).transfer(_recipient, honeyLeft);
+        }
+
         emit Deposit(msg.sender, _depositAmount, _recipient);
+    }
+
+    function _makeArray(uint256 length, uint256 value) private pure returns (uint256[] memory) {
+        uint256[] memory array = new uint256[](length);
+        for (uint256 i = 0; i < length; i++) {
+            array[i] = value;
+        }
+        return array;
     }
 
     /////////////////////////
@@ -191,69 +224,137 @@ contract BoycoBurrZap is Ownable {
      * 3. Handles minting of both NECT and HONEY tokens
      * 4. Returns array of token amounts needed for pool join
      */
-    function _splitAmounts(MintParams memory params) private returns (uint256[] memory amountsIn) {
+    function _splitAmounts(MintParams memory params) private returns (uint256 bptOut, uint256[] memory amountsIn) {
         uint256 len = params.balances.length;
-        amountsIn = new uint256[](len);
-        uint256 scaledDeposit = _upscale(params.depositAmount, _computeScalingFactor(address(TOKEN)));
-
-        uint256 tokenIndex = 0;
-        // Calculate total weighted balance
-        uint256 totalWeightedBalance = 0;
-        uint256[] memory weightedBalances = new uint256[](len);
+        uint256 totalPoolBalance = 0;
+        // @TODO move in the for loop
+        uint256 honeyIndex = _getHoneyIndex(params.tokens);
+        // @TODO move in the for loop
+        uint256 honeyMintRate = IHoneyFactory(HONEY_FACTORY).mintRates(TOKEN);
         {
-            uint256 honeyIndex = _getHoneyIndex(params.tokens);
-            uint256 honeyMintRate = IHoneyFactory(HONEY_FACTORY).mintRates(TOKEN);
             for (uint256 i = 0; i < len; i++) {
                 if (i == params.bptIndex) {
                     continue;
                 }
-                if (address(params.tokens[i]) == TOKEN) {
-                    tokenIndex = i;
-                }
-                uint256 rate = i != honeyIndex ? 1e18 : honeyMintRate;
-                // Convert balance to weighted balance using rates
-                uint256 scaledBalance = _upscale(params.balances[i], params.scalingFactors[i]);
-                uint256 weightedBalance = (scaledBalance * 1e18) / rate;
-                weightedBalances[i] = weightedBalance;
-                totalWeightedBalance += weightedBalance;
+                // if (i == honeyIndex) {
+                //     totalPoolBalance += _upscale((params.balances[i] * 1e18) / honeyMintRate, params.scalingFactors[i]);
+                // } else {
+                totalPoolBalance += _upscale(params.balances[i], params.scalingFactors[i]);
+                // }
             }
-        }
 
-        for (uint256 i = 0; i < len; i++) {
-            if (i == params.bptIndex) {
-                continue;
-            }
-            uint256 amountIn = (scaledDeposit * weightedBalances[i]) / totalWeightedBalance;
-            if (address(params.tokens[i]) == NECT) {
-                amountsIn[i] = IPSMBondProxy(PSM_BOND_PROXY).deposit(
-                    _downscaleDown(amountIn, params.scalingFactors[tokenIndex]), address(this)
-                );
-            } else if (address(params.tokens[i]) == HONEY) {
-                amountsIn[i] = IHoneyFactory(HONEY_FACTORY).mint(
-                    TOKEN, _downscaleDown(amountIn, params.scalingFactors[tokenIndex]), address(this), false
-                );
-            }
-        }
+            // @TODO improve
+            totalPoolBalance = (totalPoolBalance * 1e18) / honeyMintRate;
+            uint256 scaledDeposit = _upscale(params.depositAmount, _computeScalingFactor(address(TOKEN)));
 
-        // for the token amount, we just use the left over balance
-        // because joinPool uses EXACT_TOKENS_IN_FOR_BPT_OUT
-        // this ensures that the vault will transfer the full amount
-        // of all token in the request and there is no dust left
-        // this avoids having to transfer dust back to the user
+            // BalancerQueries
+            (bptOut, amountsIn) = IBalancerQueries(0x4475Ba7AfdCfC0ED90772843A106b2C77395f19C)
+                // @TODO fix
+                .queryJoin(
+                params.poolId,
+                address(this),
+                address(this),
+                IVault.JoinPoolRequest({
+                    assets: _asIAsset(params.tokens),
+                    maxAmountsIn: _makeArray(params.tokens.length, type(uint256).max),
+                    userData: abi.encode(
+                        StablePoolUserData.JoinKind.ALL_TOKENS_IN_FOR_EXACT_BPT_OUT,
+                        (scaledDeposit * IComposableStablePool(POOL).getActualSupply()) / totalPoolBalance
+                    ),
+                    fromInternalBalance: false
+                })
+            );
+
+            console.log("[_splitAmounts] bptOut", bptOut);
+            console.log("[_splitAmounts] amountsIn[0]", amountsIn[0]);
+            console.log("[_splitAmounts] amountsIn[1]", amountsIn[1]);
+            console.log("[_splitAmounts] amountsIn[2]", amountsIn[2]);
+            console.log("[_splitAmounts] amountsIn.length", amountsIn.length);
+
+            console.log("[_splitAmounts] amountsIn[honeyIndex]", amountsIn[honeyIndex]);
+            console.log("[_splitAmounts] honeyMintRate", honeyMintRate);
+        }
+        uint256 usdcRequiredForHoney = (amountsIn[honeyIndex] * 1e18) / honeyMintRate;
+        console.log("[_splitAmounts] usdcRequiredForHoney", usdcRequiredForHoney);
+        uint256 tokenIndex = _getTokenIndex(params.tokens, TOKEN);
+        amountsIn[honeyIndex] = IHoneyFactory(HONEY_FACTORY).mint(
+            TOKEN, _downscaleDown(usdcRequiredForHoney, params.scalingFactors[tokenIndex]) + 1, address(this), false
+        );
+
+        console.log("[_splitAmounts] USDC Balance", IERC20(TOKEN).balanceOf(address(this)));
+        console.log(
+            "[_splitAmounts] Depositing USDC for NECT",
+            _downscaleDown(amountsIn[_getTokenIndex(params.tokens, NECT)], params.scalingFactors[tokenIndex])
+        );
+        // @TODO move in the for loop
+        uint256 nectIndex = _getTokenIndex(params.tokens, NECT);
+        amountsIn[nectIndex] = IPSMBondProxy(PSM_BOND_PROXY).deposit(
+            _downscaleDown(amountsIn[_getTokenIndex(params.tokens, NECT)], params.scalingFactors[tokenIndex]) + 1,
+            address(this)
+        );
+        console.log("[_splitAmounts] USDC Balance", IERC20(TOKEN).balanceOf(address(this)));
         amountsIn[tokenIndex] = IERC20(TOKEN).balanceOf(address(this));
+
+        // Calculate total weighted balance
+        // uint256 totalWeightedBalance = 0;
+        // uint256[] memory weightedBalances = new uint256[](len);
+        // {
+        //     uint256 honeyIndex = _getHoneyIndex(params.tokens);
+        //     uint256 honeyMintRate = IHoneyFactory(HONEY_FACTORY).mintRates(TOKEN);
+        //     for (uint256 i = 0; i < len; i++) {
+        //         if (i == params.bptIndex) {
+        //             continue;
+        //         }
+        //         if (address(params.tokens[i]) == TOKEN) {
+        //             tokenIndex = i;
+        //         }
+        //         uint256 rate = i != honeyIndex ? 1e18 : honeyMintRate;
+        //         // Convert balance to weighted balance using rates
+        //         uint256 scaledBalance = _upscale(params.balances[i], params.scalingFactors[i]);
+        //         uint256 weightedBalance = (scaledBalance * 1e18) / rate;
+        //         weightedBalances[i] = weightedBalance;
+        //         totalWeightedBalance += weightedBalance;
+        //     }
+        // }
+
+        // for (uint256 i = 0; i < len; i++) {
+        //     if (i == params.bptIndex) {
+        //         continue;
+        //     }
+        //     uint256 amountIn = (scaledDeposit * weightedBalances[i]) / totalWeightedBalance;
+        //     if (address(params.tokens[i]) == NECT) {
+        //         amountsIn[i] = IPSMBondProxy(PSM_BOND_PROXY).deposit(
+        //             _downscaleDown(amountIn, params.scalingFactors[tokenIndex]),
+        //             address(this)
+        //         );
+        //     } else if (address(params.tokens[i]) == HONEY) {
+        //         amountsIn[i] = IHoneyFactory(HONEY_FACTORY).mint(
+        //             TOKEN,
+        //             _downscaleDown(amountIn, params.scalingFactors[tokenIndex]),
+        //             address(this),
+        //             false
+        //         );
+        //     } else if (address(params.tokens[i]) == TOKEN) {
+        //         amountsIn[i] = _downscaleDown(amountIn, params.scalingFactors[tokenIndex]);
+        //     }
+        // }
     }
 
-    function _getHoneyIndex(IERC20[] memory tokens) private view returns (uint256) {
+    function _getTokenIndex(IERC20[] memory tokens, address _token) private view returns (uint256) {
         uint256 len = tokens.length;
         for (uint256 i = 0; i < len; i++) {
-            if (address(tokens[i]) == HONEY) {
+            if (address(tokens[i]) == _token) {
                 return i;
             }
         }
         // this should never happen
-        require(false, ERROR_HONEY_NOT_IN_POOL);
+        require(false, ERROR_TOKEN_NOT_IN_POOL);
         // silence the compiler warnings
         return 0;
+    }
+
+    function _getHoneyIndex(IERC20[] memory tokens) private view returns (uint256) {
+        return _getTokenIndex(tokens, HONEY);
     }
 
     /// @dev Executes the pool join transaction
@@ -261,7 +362,7 @@ contract BoycoBurrZap is Ownable {
         bytes32 poolId,
         IERC20[] memory tokens,
         uint256[] memory amountsIn,
-        uint256 bptIndex,
+        uint256 bptAmountOut,
         address recipient
     ) private {
         uint256[] memory maxAmountsIn = new uint256[](amountsIn.length);
@@ -269,16 +370,14 @@ contract BoycoBurrZap is Ownable {
             maxAmountsIn[i] = type(uint256).max;
         }
 
-        IVault(VAULT).joinPool(
+        IVault(payable(VAULT)).joinPool(
             poolId,
             address(this),
             recipient,
             IVault.JoinPoolRequest({
                 assets: _asIAsset(tokens),
                 maxAmountsIn: maxAmountsIn,
-                userData: abi.encode(
-                    StablePoolUserData.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT, _dropBptItem(amountsIn, bptIndex), 0
-                ),
+                userData: abi.encode(StablePoolUserData.JoinKind.ALL_TOKENS_IN_FOR_EXACT_BPT_OUT, bptAmountOut),
                 fromInternalBalance: false
             })
         );
@@ -327,6 +426,7 @@ interface IComposableStablePool {
     function getBptIndex() external view returns (uint256);
     function getPoolId() external view returns (bytes32);
     function getVault() external view returns (address);
+    function getActualSupply() external view returns (uint256);
 }
 
 interface IHoneyFactory {
