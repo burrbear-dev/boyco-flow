@@ -7,6 +7,7 @@ import {IAsset} from "@balancer-labs/v2-interfaces/contracts/vault/IAsset.sol";
 import {IERC20} from "@balancer-labs/v2-interfaces/contracts/solidity-utils/openzeppelin/IERC20.sol";
 import {_upscale, _downscaleDown} from "@balancer-labs/v2-solidity-utils/contracts/helpers/ScalingHelpers.sol";
 import {StablePoolUserData} from "@balancer-labs/v2-interfaces/contracts/pool-stable/StablePoolUserData.sol";
+import {IBalancerQueries} from "@balancer-labs/v2-interfaces/contracts/standalone-utils/IBalancerQueries.sol";
 import {Ownable} from "@balancer-labs/v2-solidity-utils/contracts/openzeppelin/Ownable.sol";
 
 /**
@@ -49,6 +50,8 @@ import {Ownable} from "@balancer-labs/v2-solidity-utils/contracts/openzeppelin/O
 contract BoycoBurrZap is Ownable {
     // ---- Error messages ----
     string private constant ERROR_INVALID_RECIPIENT = "Invalid recipient";
+    string private constant ERROR_INVALID_CONSTRUCTOR_ARG = "Invalid constructor arg";
+    string private constant ERROR_INVALID_BALANCER_QUERIES_VAULT = "Invalid balancer queries vault";
     string private constant ERROR_INVALID_DEPOSIT = "Invalid deposit amount";
     string private constant ERROR_TOKEN_NOT_IN_POOL = "Token not in pool";
     string private constant ERROR_HONEY_RATE = "Invalid honey rate";
@@ -56,9 +59,10 @@ contract BoycoBurrZap is Ownable {
     string private constant ERROR_NOT_WHITELISTED = "Not whitelisted";
     string private constant ERROR_HONEY_NOT_IN_POOL = "HONEY not in pool";
 
-    // ---- Immutable state variables ----
+    // ---- Tokens and Vault/Pool related variables ----
     address public immutable TOKEN;
     address public immutable POOL;
+    address public immutable BALANCER_QUERIES;
     address public immutable VAULT;
     address public immutable HONEY_FACTORY;
     address public immutable HONEY;
@@ -78,7 +82,6 @@ contract BoycoBurrZap is Ownable {
     struct MintParams {
         IERC20[] tokens;
         uint256[] balances;
-        uint256[] scalingFactors;
         uint256 bptIndex;
         uint256 depositAmount;
     }
@@ -95,17 +98,28 @@ contract BoycoBurrZap is Ownable {
      * @param _nect Nectar token address
      * @param _pBondProxy Beraborrow's psm bond proxy address to deposit and mint NECT from
      */
-    constructor(address _token, address _pool, address _honeyFactory, address _nect, address _pBondProxy) Ownable() {
-        require(_token != address(0), ERROR_INVALID_RECIPIENT);
-        require(_pool != address(0), ERROR_INVALID_RECIPIENT);
-        require(_honeyFactory != address(0), ERROR_INVALID_RECIPIENT);
-        require(_nect != address(0), ERROR_INVALID_RECIPIENT);
-        require(_pBondProxy != address(0), ERROR_INVALID_RECIPIENT);
+    constructor(
+        address _token,
+        address _pool,
+        address _balancerQueries,
+        address _honeyFactory,
+        address _nect,
+        address _pBondProxy
+    ) Ownable() {
+        require(_token != address(0), ERROR_INVALID_CONSTRUCTOR_ARG);
+        require(_pool != address(0), ERROR_INVALID_CONSTRUCTOR_ARG);
+        require(_balancerQueries != address(0), ERROR_INVALID_CONSTRUCTOR_ARG);
+        require(_honeyFactory != address(0), ERROR_INVALID_CONSTRUCTOR_ARG);
+        require(_nect != address(0), ERROR_INVALID_CONSTRUCTOR_ARG);
+        require(_pBondProxy != address(0), ERROR_INVALID_CONSTRUCTOR_ARG);
 
         address _vault = IComposableStablePool(_pool).getVault();
+        // ensure the vault is the same as the one in the balancer queries
+        require(IHasVault(_balancerQueries).vault() == _vault, ERROR_INVALID_BALANCER_QUERIES_VAULT);
         address _honey = IHoneyFactory(_honeyFactory).honey();
         TOKEN = _token;
         POOL = _pool;
+        BALANCER_QUERIES = _balancerQueries;
         VAULT = _vault;
         HONEY = _honey;
         HONEY_FACTORY = _honeyFactory;
@@ -150,7 +164,7 @@ contract BoycoBurrZap is Ownable {
     /////// WHITELISTED /////
     /////////////////////////
 
-    /// @notice Takes a token (e.g. USDC) and gives back LP tokens in return
+    /// @notice Takes a token (e.g. USDC) and sends LP tokens to recipient in return
     /// @param _depositAmount Amount of tokens to deposit
     /// @param _recipient Address to receive LP tokens
     function deposit(uint256 _depositAmount, address _recipient) public onlyWhitelisted {
@@ -163,18 +177,21 @@ contract BoycoBurrZap is Ownable {
         bytes32 poolId = IComposableStablePool(POOL).getPoolId();
         (IERC20[] memory tokens, uint256[] memory balances,) = IVault(VAULT).getPoolTokens(poolId);
         uint256 bptIndex = IComposableStablePool(POOL).getBptIndex();
-        uint256[] memory scalingFactors = IComposableStablePool(POOL).getScalingFactors();
 
         // Calculate amounts and validate pool composition
-        uint256[] memory amountsIn = _splitAmounts(
-            MintParams({
-                tokens: tokens,
-                balances: balances,
-                scalingFactors: scalingFactors,
-                bptIndex: bptIndex,
-                depositAmount: _depositAmount
-            })
+        (uint256[] memory amountsIn, uint256 nectIndex, uint256 honeyIndex, uint256 tokenIndex) = _splitAmounts(
+            MintParams({tokens: tokens, balances: balances, bptIndex: bptIndex, depositAmount: _depositAmount})
         );
+
+        amountsIn[nectIndex] = IPSMBondProxy(PSM_BOND_PROXY).deposit(amountsIn[nectIndex], address(this));
+        amountsIn[honeyIndex] = IHoneyFactory(HONEY_FACTORY).mint(TOKEN, amountsIn[honeyIndex], address(this), false);
+
+        // for the token amount, we just use the left over balance
+        // because joinPool uses EXACT_TOKENS_IN_FOR_BPT_OUT
+        // this ensures that the vault will transfer the full amount
+        // of all token in the request and there is no dust left
+        // this avoids having to transfer dust back to the user
+        amountsIn[tokenIndex] = IERC20(TOKEN).balanceOf(address(this));
         // Execute join pool transaction
         _joinPool(poolId, tokens, amountsIn, bptIndex, _recipient);
         emit Deposit(msg.sender, _depositAmount, _recipient);
@@ -191,17 +208,20 @@ contract BoycoBurrZap is Ownable {
      * 3. Handles minting of both NECT and HONEY tokens
      * 4. Returns array of token amounts needed for pool join
      */
-    function _splitAmounts(MintParams memory params) private returns (uint256[] memory amountsIn) {
+    function _splitAmounts(MintParams memory params)
+        private
+        returns (uint256[] memory amountsIn, uint256 nectIndex, uint256 honeyIndex, uint256 tokenIndex)
+    {
         uint256 len = params.balances.length;
         amountsIn = new uint256[](len);
         uint256 scaledDeposit = _upscale(params.depositAmount, _computeScalingFactor(address(TOKEN)));
+        uint256[] memory scalingFactors = IComposableStablePool(POOL).getScalingFactors();
 
-        uint256 tokenIndex = 0;
         // Calculate total weighted balance
         uint256 totalWeightedBalance = 0;
         uint256[] memory weightedBalances = new uint256[](len);
+        honeyIndex = _getHoneyIndex(params.tokens);
         {
-            uint256 honeyIndex = _getHoneyIndex(params.tokens);
             uint256 honeyMintRate = IHoneyFactory(HONEY_FACTORY).mintRates(TOKEN);
             for (uint256 i = 0; i < len; i++) {
                 if (i == params.bptIndex) {
@@ -210,37 +230,72 @@ contract BoycoBurrZap is Ownable {
                 if (address(params.tokens[i]) == TOKEN) {
                     tokenIndex = i;
                 }
+                if (address(params.tokens[i]) == NECT) {
+                    nectIndex = i;
+                }
                 uint256 rate = i != honeyIndex ? 1e18 : honeyMintRate;
                 // Convert balance to weighted balance using rates
-                uint256 scaledBalance = _upscale(params.balances[i], params.scalingFactors[i]);
+                uint256 scaledBalance = _upscale(params.balances[i], scalingFactors[i]);
                 uint256 weightedBalance = (scaledBalance * 1e18) / rate;
                 weightedBalances[i] = weightedBalance;
                 totalWeightedBalance += weightedBalance;
             }
         }
 
+        uint256 tokenScalingFactor = scalingFactors[tokenIndex];
         for (uint256 i = 0; i < len; i++) {
             if (i == params.bptIndex) {
                 continue;
             }
             uint256 amountIn = (scaledDeposit * weightedBalances[i]) / totalWeightedBalance;
+            // minting Honey and Nect requires the amount to be in the source token's decimals
             if (address(params.tokens[i]) == NECT) {
-                amountsIn[i] = IPSMBondProxy(PSM_BOND_PROXY).deposit(
-                    _downscaleDown(amountIn, params.scalingFactors[tokenIndex]), address(this)
-                );
+                amountsIn[i] = _downscaleDown(amountIn, tokenScalingFactor);
             } else if (address(params.tokens[i]) == HONEY) {
-                amountsIn[i] = IHoneyFactory(HONEY_FACTORY).mint(
-                    TOKEN, _downscaleDown(amountIn, params.scalingFactors[tokenIndex]), address(this), false
-                );
+                amountsIn[i] = _downscaleDown(amountIn, tokenScalingFactor);
             }
+            // skip computing the token amounts here;
+            // in the actual deposit function the token amounts
+            // are overridden by balanceOf
         }
+    }
 
-        // for the token amount, we just use the left over balance
-        // because joinPool uses EXACT_TOKENS_IN_FOR_BPT_OUT
-        // this ensures that the vault will transfer the full amount
-        // of all token in the request and there is no dust left
-        // this avoids having to transfer dust back to the user
-        amountsIn[tokenIndex] = IERC20(TOKEN).balanceOf(address(this));
+    function queryDeposit(uint256 _depositAmount, address _recipient) external returns (uint256 bptOut) {
+        require(_depositAmount > 0, ERROR_INVALID_DEPOSIT);
+
+        // Get pool information
+        bytes32 poolId = IComposableStablePool(POOL).getPoolId();
+        (IERC20[] memory tokens, uint256[] memory balances,) = IVault(VAULT).getPoolTokens(poolId);
+        uint256 bptIndex = IComposableStablePool(POOL).getBptIndex();
+
+        // Calculate amounts and validate pool composition
+        (uint256[] memory amountsIn, uint256 nectIndex, uint256 honeyIndex, uint256 tokenIndex) = _splitAmounts(
+            MintParams({tokens: tokens, balances: balances, bptIndex: bptIndex, depositAmount: _depositAmount})
+        );
+
+        uint256 honeyRate = IHoneyFactory(HONEY_FACTORY).mintRates(TOKEN);
+        amountsIn[honeyIndex] =
+            (_upscale(amountsIn[honeyIndex], _computeScalingFactor(address(TOKEN))) * honeyRate) / 1e18;
+        amountsIn[nectIndex] = _upscale(amountsIn[nectIndex], _computeScalingFactor(address(TOKEN)));
+        amountsIn[tokenIndex] = _downscaleDown(
+            _upscale(_depositAmount, _computeScalingFactor(address(TOKEN)))
+                - (amountsIn[nectIndex] + amountsIn[honeyIndex]),
+            _computeScalingFactor(address(TOKEN))
+        );
+
+        (bptOut,) = IBalancerQueries(BALANCER_QUERIES).queryJoin(
+            poolId,
+            address(msg.sender),
+            _recipient,
+            IVault.JoinPoolRequest({
+                assets: _asIAsset(tokens),
+                maxAmountsIn: _arrayValues(balances.length, type(uint256).max),
+                userData: abi.encode(
+                    StablePoolUserData.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT, _dropBptItem(amountsIn, bptIndex), 0
+                ),
+                fromInternalBalance: false
+            })
+        );
     }
 
     function _getHoneyIndex(IERC20[] memory tokens) private view returns (uint256) {
@@ -264,24 +319,27 @@ contract BoycoBurrZap is Ownable {
         uint256 bptIndex,
         address recipient
     ) private {
-        uint256[] memory maxAmountsIn = new uint256[](amountsIn.length);
-        for (uint256 i = 0; i < amountsIn.length; i++) {
-            maxAmountsIn[i] = type(uint256).max;
-        }
-
         IVault(VAULT).joinPool(
             poolId,
             address(this),
             recipient,
             IVault.JoinPoolRequest({
                 assets: _asIAsset(tokens),
-                maxAmountsIn: maxAmountsIn,
+                maxAmountsIn: _arrayValues(amountsIn.length, type(uint256).max),
                 userData: abi.encode(
                     StablePoolUserData.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT, _dropBptItem(amountsIn, bptIndex), 0
                 ),
                 fromInternalBalance: false
             })
         );
+    }
+
+    function _arrayValues(uint256 length, uint256 value) internal pure returns (uint256[] memory) {
+        uint256[] memory array = new uint256[](length);
+        for (uint256 i = 0; i < length; i++) {
+            array[i] = value;
+        }
+        return array;
     }
 
     function _asIAsset(IERC20[] memory addresses) internal pure returns (IAsset[] memory assets) {
@@ -337,4 +395,8 @@ interface IHoneyFactory {
 
 interface IPSMBondProxy {
     function deposit(uint256 amount, address receiver) external returns (uint256);
+}
+
+interface IHasVault {
+    function vault() external view returns (address);
 }

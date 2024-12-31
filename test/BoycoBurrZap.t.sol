@@ -13,6 +13,7 @@ import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 contract BoycoBurrZapTest is Test {
     // cArtio environment
     address constant VAULT = 0x398D4CFB5D29d18BaA149497656904F2e8814EFb;
+    address constant BALANCER_QUERIES = 0x4475Ba7AfdCfC0ED90772843A106b2C77395f19C;
     address constant COMPOSABLE_STABLE_POOL_FACTORY = 0x7B59a632c20B0015548CbF61193476664eB900ab;
     address constant NECT_USDC_HONEY_POOL = 0xFbb99BAD8eca0736A9ab2a7f566dEbC9acb607f0;
     address constant USDC = 0x015fd589F4f1A33ce4487E12714e1B15129c9329;
@@ -29,6 +30,8 @@ contract BoycoBurrZapTest is Test {
     uint256 constant PRECISION = 1e18;
     // 0.001%
     uint256 constant RATIO_TOLERANCE = 1e13;
+    // 0.01% - the % difference between the query call and the actual deposit LP amounts allowed
+    uint256 constant LP_QUERY_TOLERANCE = 1e14;
     // 1e13 is 100 trillion
     uint256 constant MAX_USDC_DEPOSIT = 1e6 * 1e13;
     uint256 constant MAX_NECT_HONEY_AMOUNTS = 1e18 * 1e13;
@@ -166,6 +169,75 @@ contract BoycoBurrZapTest is Test {
         _depositAndAssert(_usdcAmount, pool);
     }
 
+    function test_Fuzz_query_deposit(uint256 _depositAmount) public {
+        vm.assume(_depositAmount > 0 && _depositAmount < MAX_USDC_DEPOSIT);
+        console.log("_depositAmount", _depositAmount);
+        _vaultAproveAllTokens(alice);
+        uint256 initialDeposit = 1e6 * 1_000_000;
+        _depositAndAssert(initialDeposit, NECT_USDC_HONEY_POOL);
+        _doRandomSwap(alice);
+
+        assertEq(IERC20(NECT_USDC_HONEY_POOL).balanceOf(bob), 0, "bob should have no LP tokens");
+        console.log("========================= Query deposit start =================");
+        uint256 queryBptAmount = zap.queryDeposit(_depositAmount, address(this));
+        console.log("queryBptAmount", queryBptAmount);
+        console.log("========================= Query deposit end =================");
+        assertEq(IERC20(NECT_USDC_HONEY_POOL).balanceOf(bob), 0, "bob should have no LP tokens after query");
+
+        // allow bob to deposit
+        zap.whitelist(bob);
+
+        vm.startPrank(bob);
+        uint256[] memory balsNoBptPre = _getBalsNoBpt(NECT_USDC_HONEY_POOL);
+        // approve zap to spend USDC
+        IERC20(USDC).approve(address(zap), _depositAmount);
+        console.log("========================= Bob deposit start =================");
+        // deposit USDC
+        zap.deposit(_depositAmount, bob);
+        console.log("========================= Bob deposit end =================");
+        // ensure zap has no tokens balance
+        _ensureNoZapBalance(zap);
+        // ensure LP tokens are minted
+        _ensureLpTokensMinted(NECT_USDC_HONEY_POOL, bob);
+        // ensure ratios are within tolerance
+        _ensureRatiosWithinTolerance(balsNoBptPre, _getBalsNoBpt(NECT_USDC_HONEY_POOL));
+
+        vm.stopPrank();
+        uint256 lpReceived = IERC20(NECT_USDC_HONEY_POOL).balanceOf(bob);
+        console.log("lpReceived", lpReceived);
+
+        if (lpReceived < queryBptAmount) {
+            uint256 diffLp = ((queryBptAmount - lpReceived) * 1e18) / queryBptAmount;
+            console.log("diffLp", diffLp);
+
+            assertLt(
+                diffLp,
+                LP_QUERY_TOLERANCE,
+                "should not get less than 0.1% less LP tokens vs what the query call returned"
+            );
+        } else {
+            uint256 diffLp = ((lpReceived - queryBptAmount) * 1e18) / queryBptAmount;
+            console.log("diffLp", diffLp);
+            assertLt(
+                diffLp,
+                LP_QUERY_TOLERANCE,
+                "should not get more than 0.1% more LP tokens vs what the query call returned"
+            );
+        }
+    }
+
+    function _printArrayDiff(uint256[] memory _a, uint256[] memory _b) internal {
+        for (uint256 i = 0; i < _a.length; i++) {
+            if (_a[i] < _b[i]) {
+                console.log("diff[", i, "] -", _b[i] - _a[i]);
+            } else if (_a[i] > _b[i]) {
+                console.log("diff[", i, "] +", _a[i] - _b[i]);
+            } else {
+                console.log("diff[", i, "] 0");
+            }
+        }
+    }
+
     function _test_price_manipulation(uint256 _depositAmount, uint256 _bobNectSwap, uint256 _aliceDeposit) public {
         // bob manipulates the price of NECT/USDC by swapping NECT -> USDC
         console.log("bob swaps NECT -> USDC", _bobNectSwap);
@@ -208,6 +280,12 @@ contract BoycoBurrZapTest is Test {
             uint256 profitRatio =
                 (bobProfit * PRECISION) / _upscale(_aliceDeposit, _computeScalingFactor(address(USDC)));
             console.log("profitRatio", profitRatio);
+
+            uint256 bobTotalBalPre = bobBalancesPre.nect + bobBalancesPre.usdc + bobBalancesPre.honey;
+            uint256 bobTotalBalPost = bobBalancesPost2.nect + bobBalancesPost2.usdc + bobBalancesPost2.honey;
+            uint256 bobTotalBalDiff = bobTotalBalPost - bobTotalBalPre;
+            console.log("bobTotalBalDiff", bobTotalBalDiff);
+            console.log("bobTotalBalDiff / bobTotalBalPre", bobTotalBalDiff / bobTotalBalPre);
 
             assertLt(profitRatio, PROFIT_TOLERANCE, "bob should have made less than 10% profit");
         } else {
@@ -273,13 +351,21 @@ contract BoycoBurrZapTest is Test {
         return balsNoBpt;
     }
 
-    function _snapshot_user_balances(address _user) internal view returns (UserBalances memory) {
-        UserBalances memory balances;
+    function _snapshot_user_balances(address _user) internal view returns (UserBalances memory balances) {
         balances.usdc = IERC20(USDC).balanceOf(_user);
         balances.nect = IERC20(NECT).balanceOf(_user);
         balances.honey = IERC20(IHoneyFactory(HONEY_FACTORY).honey()).balanceOf(_user);
         balances.lp = IERC20(NECT_USDC_HONEY_POOL).balanceOf(_user);
-        return balances;
+    }
+
+    function _snapshot_user_balances_list(address _user) internal view returns (uint256[] memory) {
+        bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
+        (IERC20[] memory tokens,,) = IVault(VAULT).getPoolTokens(poolId);
+        uint256[] memory userBals = new uint256[](tokens.length);
+        for (uint256 i = 0; i < tokens.length; i++) {
+            userBals[i] = tokens[i].balanceOf(_user);
+        }
+        return userBals;
     }
 
     function _getBalsNoBpt(address _pool) internal view returns (uint256[] memory) {
@@ -506,7 +592,7 @@ contract BoycoBurrZapTest is Test {
     /// @dev Etches the BoycoBurrZap contract on top of an already
     /// whitelisted contract
     function _etchContract(address _target, address _pool) internal {
-        zap = new BoycoBurrZap(USDC, _pool, HONEY_FACTORY, NECT, PSM_BOND_PROXY);
+        zap = new BoycoBurrZap(USDC, _pool, BALANCER_QUERIES, HONEY_FACTORY, NECT, PSM_BOND_PROXY);
 
         // make this contract whitelisted for PSM
         vm.etch(_target, getCode(address(zap)));
