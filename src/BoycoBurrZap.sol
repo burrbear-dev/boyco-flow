@@ -11,6 +11,11 @@ import {StablePoolUserData} from "@balancer-labs/v2-interfaces/contracts/pool-st
 import {IBalancerQueries} from "@balancer-labs/v2-interfaces/contracts/standalone-utils/IBalancerQueries.sol";
 import {Ownable} from "@balancer-labs/v2-solidity-utils/contracts/openzeppelin/Ownable.sol";
 import {Math} from "@balancer-labs/v2-solidity-utils/contracts/math/Math.sol";
+import {IERC20Detailed} from "./interfaces/IERC20Detailed.sol";
+import {IComposableStablePool} from "./interfaces/IComposableStablePool.sol";
+import {IHoneyFactory} from "./interfaces/IHoneyFactory.sol";
+import {IPSMBondProxy} from "./interfaces/IPSMBondProxy.sol";
+import {IHasVault} from "./interfaces/IHasVault.sol";
 
 /**
  * @title BoycoBurrZap
@@ -560,29 +565,4 @@ contract BoycoBurrZap is Ownable {
         uint256 decimalsDifference = 18 - tokenDecimals;
         return 1e18 * 10 ** decimalsDifference;
     }
-}
-
-interface IERC20Detailed {
-    function decimals() external view returns (uint8);
-}
-
-interface IComposableStablePool {
-    function getScalingFactors() external view returns (uint256[] memory);
-    function getBptIndex() external view returns (uint256);
-    function getPoolId() external view returns (bytes32);
-    function getVault() external view returns (address);
-}
-
-interface IHoneyFactory {
-    function honey() external view returns (address);
-    function mintRates(address asset) external view returns (uint256);
-    function mint(address asset, uint256 amount, address receiver, bool expectBasketMode) external returns (uint256);
-}
-
-interface IPSMBondProxy {
-    function deposit(uint256 amount, address receiver) external returns (uint256);
-}
-
-interface IHasVault {
-    function vault() external view returns (address);
 }
