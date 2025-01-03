@@ -2,8 +2,6 @@
 pragma solidity ^0.7.0;
 pragma abicoder v2;
 
-import {IERC20} from "@balancer-labs/v2-interfaces/contracts/solidity-utils/openzeppelin/IERC20.sol";
-
 /**
  * @title IBoycoBurrZap
  * @notice Interface for the BoycoBurrZap contract that simplifies joining a ComposableStablePool
