@@ -256,18 +256,36 @@ contract BoycoBurrZap is Ownable {
     /////////////////////////
     //////// TWAP ///////////
     /////////////////////////
+    /// @notice Calculates the TWAP of value (in expected BPT amount out) for a given token amount deposit.
+    /// @param _tokenAmount Amount of tokens to deposit
+    /// @return expected BPT amount out based on the TWAP price of the token relative to the BPT of the pool
+    /// @dev NB: even if no new observations are made, the TWAP will still be calculated using the oldest observations
+    /// available within the time period. This is to ensure that the TWAP is always available and to avoid
+    /// reverts in case no new observations are made (offchain script failures). This makes sense for a deposit
+    /// zap contract working with a pool of stablecoins that are not volatile relative to each other.
     function consult(uint256 _tokenAmount) external view returns (uint256) {
         require(observations.length >= 2, ERROR_NOT_ENOUGH_OBSERVATIONS);
 
-        uint256 timestamp = block.timestamp;
         uint224 weightedPrice;
         uint32 timeElapsed;
 
-        for (uint256 i = observations.length - 1; i > 0; i--) {
+        // Find the most recent observation
+        uint256 mostRecentIndex = observations.length - 1;
+        uint256 endTime = observations[mostRecentIndex].timestamp;
+
+        // Calculate start time as 24h before the most recent observation
+        uint256 startTime = endTime - period;
+
+        // Iterate backwards through observations to find the first one within our window
+        uint256 i;
+        for (i = mostRecentIndex; i > 0; i--) {
             Observation memory current = observations[i];
             Observation memory previous = observations[i - 1];
 
-            if (timestamp - current.timestamp > period) break;
+            // Stop if we've gone past our start time
+            if (previous.timestamp < startTime) {
+                break;
+            }
 
             uint32 duration = current.timestamp - previous.timestamp;
             timeElapsed += duration;

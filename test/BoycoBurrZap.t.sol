@@ -388,11 +388,11 @@ contract BoycoBurrZapTest is Test {
             bptAmount != zap.consult(1e6), "consulted BPT amount should be different from the recorded BPT amount"
         );
         // we had 2 observations for the last 2h
-        // adding another 25h on top moves the slidding window outside
-        // of the known observations and should revert
+        // adding another 25h on top should NOT revert
+        // but should return the TWAP from the last recorded period
         vm.warp(block.timestamp + 25 hours);
-        vm.expectRevert("Not enough time elapsed");
-        zap.consult(1e6);
+        uint256 twap = zap.consult(1e6);
+        assertGt(twap, 0, "TWAP should be calculated from last available period");
     }
 
     function test_twap_weighted_average_calculation() public {
@@ -439,6 +439,11 @@ contract BoycoBurrZapTest is Test {
         // The TWAP should now only consider bptAmount4 and bptAmount5
         twap = zap.consult(1e6);
         assertEq(twap, 400e18, "TWAP should only consider the latest observation when others are too old");
+        vm.warp(block.timestamp + 48 hours);
+        twap = zap.consult(1e6);
+        assertEq(
+            twap, 400e18, "TWAP should only consider the latest observation even when no new observations are made"
+        );
     }
 
     function _doRandomSwap(address _user) internal {
