@@ -67,6 +67,7 @@ contract BoycoBurrZap is Ownable {
     string private constant ERROR_NOT_ENOUGH_OBSERVATIONS = "Not enough observations";
     string private constant ERROR_NOT_ENOUGH_TIME_ELAPSED = "Not enough time elapsed";
     string private constant ERROR_INVALID_BPT_AMOUNT = "Invalid BPT amount";
+    string private constant ERROR_INVALID_POOL_TOKENS = "Invalid number of pool tokens";
 
     // ---- Tokens and Vault/Pool related variables ----
     address public immutable TOKEN;
@@ -182,6 +183,8 @@ contract BoycoBurrZap is Ownable {
         bytes32 poolId = IComposableStablePool(_pool).getPoolId();
         POOL_ID = poolId;
         (IERC20[] memory tokens,,) = IVault(_vault).getPoolTokens(poolId);
+        require(tokens.length == 4, ERROR_INVALID_POOL_TOKENS);
+
         bool honeyInPool = false;
         bool tokenInPool = false;
         bool nectInPool = false;
