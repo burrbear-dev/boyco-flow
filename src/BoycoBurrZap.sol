@@ -16,6 +16,7 @@ import {IComposableStablePool} from "./interfaces/IComposableStablePool.sol";
 import {IHoneyFactory} from "./interfaces/IHoneyFactory.sol";
 import {IPSMBondProxy} from "./interfaces/IPSMBondProxy.sol";
 import {IHasVault} from "./interfaces/IHasVault.sol";
+import {IBoycoBurrZap} from "./interfaces/IBoycoBurrZap.sol";
 
 /**
  * @title BoycoBurrZap
@@ -59,7 +60,7 @@ import {IHasVault} from "./interfaces/IHasVault.sol";
  */
 
 /// @author BurrBear team
-contract BoycoBurrZap is Ownable {
+contract BoycoBurrZap is IBoycoBurrZap, Ownable {
     using SafeERC20 for IERC20;
 
     // ---- Error messages ----
@@ -256,11 +257,28 @@ contract BoycoBurrZap is Ownable {
     /////// WHITELISTED /////
     /////////////////////////
 
-    /// @notice Takes a token (e.g. USDC) and sends LP tokens to recipient in return
-    /// @param _depositAmount Amount of tokens to deposit
-    /// @param _recipient Address to receive LP tokens
-    /// @param _minBptOut Minimum BPT out amount to accept (always in 1e18 decimals)
-    function deposit(uint256 _depositAmount, address _recipient, uint256 _minBptOut) public onlyWhitelisted {
+    /**
+     * @notice Deposits tokens and receives pool LP tokens in return
+     * @dev Process flow:
+     * 1. Validates input parameters and transfers deposit token from sender
+     * 2. Retrieves current pool token balances and calculates required proportions
+     * 3. Mints required NECT via PSM Bond Proxy (1:1 ratio with deposit token)
+     * 4. Mints required HONEY via HoneyFactory (at current mint rate)
+     * 5. Uses remaining deposit token balance for pool join
+     * 6. Executes Balancer pool join with exact token amounts
+     * 7. Sends resulting LP tokens directly to recipient
+     *
+     * Requirements:
+     * - Caller must be whitelisted
+     * - Recipient cannot be zero address, this contract, or pool address
+     * - Deposit amount must be greater than 0
+     * - Sender must have approved this contract to spend deposit tokens
+     *
+     * @param _depositAmount Amount of deposit token to contribute (in token's native decimals)
+     * @param _recipient Address that will receive the LP tokens
+     * @param _minBptOut Minimum acceptable BPT (LP tokens) to receive, in 1e18 decimals
+     */
+    function deposit(uint256 _depositAmount, address _recipient, uint256 _minBptOut) public override onlyWhitelisted {
         require(_recipient != address(0) && _recipient != address(this) && _recipient != POOL, ERROR_INVALID_RECIPIENT);
         require(_depositAmount > 0, ERROR_INVALID_DEPOSIT);
         // Transfer tokens from sender
@@ -292,14 +310,22 @@ contract BoycoBurrZap is Ownable {
     /////////////////////////
     //////// TWAP ///////////
     /////////////////////////
-    /// @notice Calculates the TWAP of value (in expected BPT amount out) for a given token amount deposit.
-    /// @param _tokenAmount Amount of tokens to deposit
-    /// @return expected BPT amount out based on the TWAP price of the token relative to the BPT of the pool
-    /// @dev NB: even if no new observations are made, the TWAP will still be calculated using the oldest observations
-    /// available within the time period. This is to ensure that the TWAP is always available and to avoid
-    /// reverts in case no new observations are made (offchain script failures). This makes sense for a deposit
-    /// zap contract working with a pool of stablecoins that are not volatile relative to each other.
-    function consult(uint256 _tokenAmount) external view returns (uint256) {
+    /**
+     * @notice Calculates expected BPT output for a deposit using TWAP
+     * @dev TWAP calculation details:
+     * - Uses observations stored over the configured period (e.g., 24 hours)
+     * - Requires minimum 2 price observations
+     * - Weights prices by time duration between observations
+     * - Returns current TWAP even if no recent observations exist
+     *
+     * Formula:
+     * TWAP = Σ(price_i * duration_i) / Σ(duration_i)
+     * Expected BPT = TWAP * scaled_token_amount / 1e18
+     *
+     * @param _tokenAmount Amount of deposit token to calculate for (in token's native decimals)
+     * @return Expected BPT output amount in 1e18 decimals
+     */
+    function consult(uint256 _tokenAmount) external view override returns (uint256) {
         require(observations.length >= 2, ERROR_NOT_ENOUGH_OBSERVATIONS);
 
         uint224 weightedPrice;
@@ -367,15 +393,22 @@ contract BoycoBurrZap is Ownable {
     /////// HELPERS /////////
     /////////////////////////
 
-    /// @notice Queries the pool for the amount of BPT out for a given deposit amount
-    /// @dev only use this function for offchain price observations
-    /// If depositing token from another contract, use the `consult` function first
-    /// with the amount of token to deposit then pass the returned BPT amount to `deposit`
-    /// function as the slippage parameter (minus 1-3% slippage tolerance)
-    /// @param _depositAmount Amount of tokens to deposit
-    /// @param _recipient Address to receive LP tokens
-    /// @return bptOut Amount of BPT out
-    function queryDeposit(uint256 _depositAmount, address _recipient) external returns (uint256 bptOut) {
+    /**
+     * @notice Simulates a deposit to calculate expected BPT output
+     * @dev Important considerations:
+     * - This is a stateful function that may modify contract storage
+     * - Result includes a 0.01% reduction to account for:
+     *   * Rounding differences
+     *   * Honey mint rate variations
+     *   * Pool state changes between query and actual deposit
+     * - Should only be used for off-chain price observations
+     * - For actual deposits, use consult() to get price estimate
+     *
+     * @param _depositAmount Amount of deposit token to simulate (in token's native decimals)
+     * @param _recipient Test address to use for simulation
+     * @return bptOut Expected BPT output amount in 1e18 decimals, reduced by 0.01%
+     */
+    function queryDeposit(uint256 _depositAmount, address _recipient) external override returns (uint256 bptOut) {
         require(_depositAmount > 0, ERROR_INVALID_DEPOSIT);
 
         // Get pool information
