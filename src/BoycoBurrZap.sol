@@ -61,7 +61,7 @@ contract BoycoBurrZap is Ownable {
     string private constant ERROR_INVALID_DEPOSIT = "Invalid deposit amount";
     string private constant ERROR_TOKEN_NOT_IN_POOL = "Token not in pool";
     string private constant ERROR_HONEY_RATE = "Invalid honey rate";
-    string private constant ERROR_DECIMALS = "Token decimals > 18";
+    string private constant ERROR_INVALID_DECIMALS = "Token decimals must be <= 18";
     string private constant ERROR_NOT_WHITELISTED = "Not whitelisted";
     string private constant ERROR_HONEY_NOT_IN_POOL = "HONEY not in pool";
     string private constant ERROR_NOT_ENOUGH_OBSERVATIONS = "Not enough observations";
@@ -519,7 +519,7 @@ contract BoycoBurrZap is Ownable {
     function _computeScalingFactor(address _token) internal view returns (uint256) {
         // Tokens that don't implement the `decimals` method are not supported.
         uint256 tokenDecimals = uint256(IERC20Detailed(_token).decimals());
-        require(tokenDecimals <= 18, "Token decimals must be <= 18");
+        require(tokenDecimals <= 18, ERROR_INVALID_DECIMALS);
 
         // Tokens with more than 18 decimals are not supported.
         uint256 decimalsDifference = 18 - tokenDecimals;
