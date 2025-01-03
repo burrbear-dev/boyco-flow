@@ -779,6 +779,91 @@ contract BoycoBurrZapTest is Test {
         uint256 decimalsDifference = 18 - tokenDecimals;
         return 1e18 * 10 ** decimalsDifference;
     }
+
+    function test_recover_eth() public {
+        // Send some ETH to the contract
+        uint256 amount = 1 ether;
+        vm.deal(address(zap), amount);
+        assertEq(address(zap).balance, amount);
+
+        // Create recovery recipient
+        address recipient = makeAddr("recipient");
+        uint256 recipientBalanceBefore = recipient.balance;
+
+        // Non-owner should not be able to recover
+        vm.startPrank(alice);
+        vm.expectRevert("BAL#426"); // Ownable: caller is not the owner
+        zap.recoverETH(recipient, amount);
+        vm.stopPrank();
+
+        // Owner should be able to recover
+        zap.recoverETH(recipient, amount);
+
+        // Check balances
+        assertEq(address(zap).balance, 0);
+        assertEq(recipient.balance, recipientBalanceBefore + amount);
+
+        // Should revert when trying to recover to zero address
+        vm.expectRevert("Zero address");
+        zap.recoverETH(address(0), amount);
+    }
+
+    function test_recover_erc20() public {
+        // Send some tokens to the contract
+        uint256 amount = 1000e6; // 1000 USDC
+        deal(USDC, address(zap), amount);
+        assertEq(IERC20(USDC).balanceOf(address(zap)), amount);
+
+        // Create recovery recipient
+        address recipient = makeAddr("recipient");
+        uint256 recipientBalanceBefore = IERC20(USDC).balanceOf(recipient);
+
+        // Non-owner should not be able to recover
+        vm.startPrank(alice);
+        vm.expectRevert("BAL#426"); // Ownable: caller is not the owner
+        zap.recoverERC20(USDC, recipient, amount);
+        vm.stopPrank();
+
+        // Owner should be able to recover
+        zap.recoverERC20(USDC, recipient, amount);
+
+        // Check balances
+        assertEq(IERC20(USDC).balanceOf(address(zap)), 0);
+        assertEq(IERC20(USDC).balanceOf(recipient), recipientBalanceBefore + amount);
+
+        // Should revert when trying to recover to zero address
+        vm.expectRevert("Zero address");
+        zap.recoverERC20(USDC, address(0), amount);
+
+        // Should revert when trying to recover zero address token
+        vm.expectRevert("Zero address");
+        zap.recoverERC20(address(0), recipient, amount);
+    }
+
+    function test_recover_erc20_partial() public {
+        // Send some tokens to the contract
+        uint256 amount = 1000e6; // 1000 USDC
+        deal(USDC, address(zap), amount);
+
+        // Create recovery recipient
+        address recipient = makeAddr("recipient");
+        uint256 recipientBalanceBefore = IERC20(USDC).balanceOf(recipient);
+
+        // Recover half the tokens
+        uint256 recoverAmount = amount / 2;
+        zap.recoverERC20(USDC, recipient, recoverAmount);
+
+        // Check balances
+        assertEq(IERC20(USDC).balanceOf(address(zap)), recoverAmount);
+        assertEq(IERC20(USDC).balanceOf(recipient), recipientBalanceBefore + recoverAmount);
+
+        // Recover remaining tokens
+        zap.recoverERC20(USDC, recipient, recoverAmount);
+
+        // Check final balances
+        assertEq(IERC20(USDC).balanceOf(address(zap)), 0);
+        assertEq(IERC20(USDC).balanceOf(recipient), recipientBalanceBefore + amount);
+    }
 }
 
 interface IComposableStablePoolFactory {

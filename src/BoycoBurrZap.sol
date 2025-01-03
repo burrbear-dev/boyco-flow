@@ -71,6 +71,8 @@ contract BoycoBurrZap is Ownable {
     string private constant ERROR_NOT_ENOUGH_TIME_ELAPSED = "Not enough time elapsed";
     string private constant ERROR_INVALID_BPT_AMOUNT = "Invalid BPT amount";
     string private constant ERROR_INVALID_POOL_TOKENS = "Invalid number of pool tokens";
+    string private constant ERROR_TRANSFER_FAILED = "Transfer failed";
+    string private constant ERROR_ZERO_ADDRESS = "Zero address";
 
     // ---- Tokens and Vault/Pool related variables ----
     address public immutable TOKEN;
@@ -220,6 +222,29 @@ contract BoycoBurrZap is Ownable {
     function revoke(address _addy) public onlyOwner {
         whitelisted[_addy] = false;
         emit Revoked(_addy);
+    }
+
+    /**
+     * @notice Allows the owner to recover ETH accidentally sent to the contract
+     * @param _recipient Address to receive the ETH
+     * @param _amount Amount of ETH to recover
+     */
+    function recoverETH(address _recipient, uint256 _amount) external onlyOwner {
+        require(_recipient != address(0), ERROR_ZERO_ADDRESS);
+        (bool success,) = _recipient.call{value: _amount}("");
+        require(success, ERROR_TRANSFER_FAILED);
+    }
+
+    /**
+     * @notice Allows the owner to recover ERC20 tokens accidentally sent to the contract
+     * @param _token Address of the token to recover
+     * @param _recipient Address to receive the tokens
+     * @param _amount Amount of tokens to recover
+     */
+    function recoverERC20(address _token, address _recipient, uint256 _amount) external onlyOwner {
+        require(_recipient != address(0), ERROR_ZERO_ADDRESS);
+        require(_token != address(0), ERROR_ZERO_ADDRESS);
+        IERC20(_token).safeTransfer(_recipient, _amount);
     }
 
     /////////////////////////
