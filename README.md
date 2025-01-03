@@ -1,66 +1,25 @@
-## Foundry
+# BurrBear Boyco integration
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+## Integration with the zap deposit contract
 
-Foundry consists of:
+```solidity
+// Amount to deposit (1000 USDC)
+uint256 usdcAmtDeposit = 1000 * 1e6;
+address burrZap = 0xd39e7aa57CB0703cE74Bc96dA005dFceE2Ac4F56;
 
--   **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
--   **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
--   **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
--   **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+// First approve the exact deposit amount
+IERC20(USDC).approve(burrZap, usdcAmtDeposit);
 
-## Documentation
+// Get expected BPT output amount using TWAP price
+uint256 expectedBptOut = IBoycoBurrZap(burrZap).consult(usdcAmtDeposit);
 
-https://book.getfoundry.sh/
+// Apply slippage tolerance (2% in this example)
+uint256 minBptOut = (expectedBptOut * 98) / 100;
 
-## Usage
-
-### Build
-
-```shell
-$ forge build
-```
-
-### Test
-
-```shell
-$ forge test
-```
-
-### Format
-
-```shell
-$ forge fmt
-```
-
-### Gas Snapshots
-
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
+// Execute deposit
+IBoycoBurrZap(burrZap).deposit(
+    usdcAmtDeposit,    // Amount of USDC to deposit
+    msg.sender,        // Address to receive LP tokens
+    minBptOut         // Minimum BPT tokens to receive (with slippage)
+);
 ```

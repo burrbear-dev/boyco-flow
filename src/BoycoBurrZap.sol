@@ -37,7 +37,7 @@ import {IBoycoBurrZap} from "./interfaces/IBoycoBurrZap.sol";
  * - Token Approvals: Contract approves max amounts to various protocols at deployment
  *
  * @notice Process Flow:
- * 1. Boyco contract calls `IERC20(TOKEN).approve` for the amount of tokens they are depositing (ie. DO NOT APPROVE MAX)
+ * 1. Boyco contract calls `IERC20(TOKEN).approve` for the amount of tokens they are depositing
  * 2. Boyco contract calls `consult` with base token amount to receive BPT out amount value
  * 3. Boyco contract calls deposit() with base token amount, recipient address, and slippage tolerance applied to the BPT out amount
  * 4. Contract calculates required proportions based on current pool balances
@@ -46,8 +46,6 @@ import {IBoycoBurrZap} from "./interfaces/IBoycoBurrZap.sol";
  * 7. LP tokens are sent directly to specified recipient
  *
  * @dev Considerations:
- * - Calling contracts should only do IERC20(TOKEN).approve for the amount of tokens
- *   they are depositing, not the max amount!
  * - both `consult` and `deposit` use 1e18 decimals for BPT out amounts (consult returns
  *   BPT out amount, deposit uses it as slippage tolerance)
  * - Assumes the ComposableStablePool has already been initialized
