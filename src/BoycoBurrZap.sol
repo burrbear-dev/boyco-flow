@@ -433,6 +433,10 @@ contract BoycoBurrZap is Ownable {
         returns (uint256[] memory amountsIn, uint256 nectIndex, uint256 honeyIndex, uint256 tokenIndex)
     {
         uint256 len = params.balances.length;
+        // extra sanity check although this should never happen since balancer
+        // uses the same token length and order of tokens in the pool
+        require(params.tokens.length == len && params.balances.length == len, ERROR_INVALID_POOL_TOKENS);
+
         amountsIn = new uint256[](len);
         uint256 scaledDeposit = _upscale(params.depositAmount, _computeScalingFactor(address(TOKEN)));
         uint256[] memory scalingFactors = IComposableStablePool(POOL).getScalingFactors();
