@@ -5,6 +5,7 @@ pragma abicoder v2;
 import {IVault} from "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
 import {IAsset} from "@balancer-labs/v2-interfaces/contracts/vault/IAsset.sol";
 import {IERC20} from "@balancer-labs/v2-interfaces/contracts/solidity-utils/openzeppelin/IERC20.sol";
+import {SafeERC20} from "@balancer-labs/v2-solidity-utils/contracts/openzeppelin/SafeERC20.sol";
 import {_upscale, _downscaleDown} from "@balancer-labs/v2-solidity-utils/contracts/helpers/ScalingHelpers.sol";
 import {StablePoolUserData} from "@balancer-labs/v2-interfaces/contracts/pool-stable/StablePoolUserData.sol";
 import {IBalancerQueries} from "@balancer-labs/v2-interfaces/contracts/standalone-utils/IBalancerQueries.sol";
@@ -54,6 +55,8 @@ import {Math} from "@balancer-labs/v2-solidity-utils/contracts/math/Math.sol";
 
 /// @author BurrBear team
 contract BoycoBurrZap is Ownable {
+    using SafeERC20 for IERC20;
+
     // ---- Error messages ----
     string private constant ERROR_INVALID_RECIPIENT = "Invalid recipient";
     string private constant ERROR_INVALID_CONSTRUCTOR_ARG = "Invalid constructor arg";
@@ -231,7 +234,7 @@ contract BoycoBurrZap is Ownable {
         require(_recipient != address(0) && _recipient != address(this) && _recipient != POOL, ERROR_INVALID_RECIPIENT);
         require(_depositAmount > 0, ERROR_INVALID_DEPOSIT);
         // Transfer tokens from sender
-        IERC20(TOKEN).transferFrom(msg.sender, address(this), _depositAmount);
+        IERC20(TOKEN).safeTransferFrom(msg.sender, address(this), _depositAmount);
 
         // Get pool information
         (IERC20[] memory tokens, uint256[] memory balances,) = IVault(VAULT).getPoolTokens(POOL_ID);
