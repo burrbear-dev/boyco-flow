@@ -113,6 +113,7 @@ contract BoycoBurrZap is Ownable {
         uint224 price; // 224 bits
     }
     // array of observations to keep in the sliding window
+
     Observation[] public observations;
     // total time period to calculate TWAP over (ie. sliding window)
     uint256 public immutable period;
@@ -180,7 +181,7 @@ contract BoycoBurrZap is Ownable {
         // ensure all tokens are present in the pool
         bytes32 poolId = IComposableStablePool(_pool).getPoolId();
         POOL_ID = poolId;
-        (IERC20[] memory tokens, , ) = IVault(_vault).getPoolTokens(poolId);
+        (IERC20[] memory tokens,,) = IVault(_vault).getPoolTokens(poolId);
         bool honeyInPool = false;
         bool tokenInPool = false;
         bool nectInPool = false;
@@ -230,7 +231,7 @@ contract BoycoBurrZap is Ownable {
         IERC20(TOKEN).transferFrom(msg.sender, address(this), _depositAmount);
 
         // Get pool information
-        (IERC20[] memory tokens, uint256[] memory balances, ) = IVault(VAULT).getPoolTokens(POOL_ID);
+        (IERC20[] memory tokens, uint256[] memory balances,) = IVault(VAULT).getPoolTokens(POOL_ID);
         uint256 bptIndex = IComposableStablePool(POOL).getBptIndex();
 
         // Calculate amounts and validate pool composition
@@ -258,7 +259,7 @@ contract BoycoBurrZap is Ownable {
     function consult(uint256 _tokenAmount) external view returns (uint256) {
         require(observations.length >= 2, ERROR_NOT_ENOUGH_OBSERVATIONS);
 
-        uint timestamp = block.timestamp;
+        uint256 timestamp = block.timestamp;
         uint224 weightedPrice;
         uint32 timeElapsed;
 
@@ -304,7 +305,7 @@ contract BoycoBurrZap is Ownable {
         // allow the first 2 observations to be recorded without checking the time elapsed
         if (observations.length < 2) return true;
 
-        uint timeElapsed = block.timestamp - observations[observations.length - 1].timestamp;
+        uint256 timeElapsed = block.timestamp - observations[observations.length - 1].timestamp;
         return timeElapsed >= period / granularity;
     }
 
@@ -324,7 +325,7 @@ contract BoycoBurrZap is Ownable {
         require(_depositAmount > 0, ERROR_INVALID_DEPOSIT);
 
         // Get pool information
-        (IERC20[] memory tokens, uint256[] memory balances, ) = IVault(VAULT).getPoolTokens(POOL_ID);
+        (IERC20[] memory tokens, uint256[] memory balances,) = IVault(VAULT).getPoolTokens(POOL_ID);
         uint256 bptIndex = IComposableStablePool(POOL).getBptIndex();
 
         // Calculate amounts and validate pool composition
@@ -337,18 +338,16 @@ contract BoycoBurrZap is Ownable {
             // Simulate the actual minting of Honey to get the exact amounts
             uint256 honeyRate = IHoneyFactory(HONEY_FACTORY).mintRates(TOKEN);
             amountsIn[honeyIndex] =
-                (_upscale(amountsIn[honeyIndex], _computeScalingFactor(address(TOKEN))) * honeyRate) /
-                1e18;
+                (_upscale(amountsIn[honeyIndex], _computeScalingFactor(address(TOKEN))) * honeyRate) / 1e18;
             amountsIn[nectIndex] = _upscale(amountsIn[nectIndex], _computeScalingFactor(address(TOKEN)));
 
             // Calculate remaining token amount after minting operations
             amountsIn[tokenIndex] = _downscaleDown(
-                depositScaled - amountsIn[nectIndex] - amountsIn[honeyIndex],
-                _computeScalingFactor(address(TOKEN))
+                depositScaled - amountsIn[nectIndex] - amountsIn[honeyIndex], _computeScalingFactor(address(TOKEN))
             );
         }
 
-        (bptOut, ) = IBalancerQueries(BALANCER_QUERIES).queryJoin(
+        (bptOut,) = IBalancerQueries(BALANCER_QUERIES).queryJoin(
             POOL_ID,
             address(msg.sender),
             _recipient,
@@ -356,9 +355,7 @@ contract BoycoBurrZap is Ownable {
                 assets: _asIAsset(tokens),
                 maxAmountsIn: _arrayValues(balances.length, type(uint256).max),
                 userData: abi.encode(
-                    StablePoolUserData.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT,
-                    _dropBptItem(amountsIn, bptIndex),
-                    0
+                    StablePoolUserData.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT, _dropBptItem(amountsIn, bptIndex), 0
                 ),
                 fromInternalBalance: false
             })
@@ -381,9 +378,11 @@ contract BoycoBurrZap is Ownable {
      * 3. Handles minting of both NECT and HONEY tokens
      * 4. Returns array of token amounts needed for pool join
      */
-    function _splitAmounts(
-        MintParams memory params
-    ) private view returns (uint256[] memory amountsIn, uint256 nectIndex, uint256 honeyIndex, uint256 tokenIndex) {
+    function _splitAmounts(MintParams memory params)
+        private
+        view
+        returns (uint256[] memory amountsIn, uint256 nectIndex, uint256 honeyIndex, uint256 tokenIndex)
+    {
         uint256 len = params.balances.length;
         amountsIn = new uint256[](len);
         uint256 scaledDeposit = _upscale(params.depositAmount, _computeScalingFactor(address(TOKEN)));
@@ -461,9 +460,7 @@ contract BoycoBurrZap is Ownable {
                 assets: _asIAsset(tokens),
                 maxAmountsIn: _arrayValues(amountsIn.length, type(uint256).max),
                 userData: abi.encode(
-                    StablePoolUserData.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT,
-                    _dropBptItem(amountsIn, bptIndex),
-                    minBptOut
+                    StablePoolUserData.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT, _dropBptItem(amountsIn, bptIndex), minBptOut
                 ),
                 fromInternalBalance: false
             })

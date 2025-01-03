@@ -1,0 +1,11 @@
+{
+  "[solidity]": {
+      "editor.defaultFormatter": "JuanBlanco.solidity",
+      "editor.formatOnSave": true
+  },
+  "solidity.formatter": "forge",
+  "editor.formatOnSave": true,
+  "editor.detectIndentation": false,
+  "editor.insertSpaces": true,
+  "editor.tabSize": 4
+}
