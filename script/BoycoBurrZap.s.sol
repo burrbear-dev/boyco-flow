@@ -21,8 +21,16 @@ contract BoycoBurrZapScript is Script {
     function run() public {
         vm.startBroadcast();
         // cartio deployment
-        BoycoBurrZap zap =
-            new BoycoBurrZap(USDC, NECT_USDC_HONEY_POOL, BALANCER_QUERIES, HONEY_FACTORY, NECT, PSM_BOND_PROXY);
+        BoycoBurrZap zap = new BoycoBurrZap(
+            USDC,
+            NECT_USDC_HONEY_POOL,
+            BALANCER_QUERIES,
+            HONEY_FACTORY,
+            NECT,
+            PSM_BOND_PROXY,
+            24 hours,
+            24
+        );
         // whitelist sender
         zap.whitelist(msg.sender);
 

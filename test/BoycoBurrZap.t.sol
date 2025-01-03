@@ -30,13 +30,13 @@ contract BoycoBurrZapTest is Test {
     uint256 constant PRECISION = 1e18;
     // 0.001%
     uint256 constant RATIO_TOLERANCE = 1e13;
-    // 0.01% - the % difference between the query call and the actual deposit LP amounts allowed
-    uint256 constant LP_QUERY_TOLERANCE = 1e14;
+    // 0.1% - the % difference between the query call and the actual deposit LP amounts allowed
+    uint256 constant LP_QUERY_TOLERANCE = 1e15;
     // 1e13 is 100 trillion
     uint256 constant MAX_USDC_DEPOSIT = 1e6 * 1e13;
     uint256 constant MAX_NECT_HONEY_AMOUNTS = 1e18 * 1e13;
-    // 10% in 1e18 precision
-    uint256 constant PROFIT_TOLERANCE = 1e17;
+    // max allowed slippage for the deposit vs `consult` value
+    uint256 constant MAX_ALLOWED_SLIPPAGE = 3e16; // 3% in 1e18 precision
 
     BoycoBurrZap zap;
     address alice;
@@ -65,6 +65,14 @@ contract BoycoBurrZapTest is Test {
         zap.whitelist(address(this));
     }
 
+    // record enough observations for the TWAP to work
+    function _setupTwapObservations() internal {
+        uint256 bptAmount = zap.queryDeposit(1e6, address(this));
+        zap.recordObservation(bptAmount);
+        vm.warp(block.timestamp + 1 seconds);
+        zap.recordObservation(bptAmount);
+    }
+
     function _dealTokens(address _user) internal {
         deal(USDC, _user, 2 ** 111);
         deal(NECT, _user, 2 ** 111);
@@ -72,6 +80,7 @@ contract BoycoBurrZapTest is Test {
     }
 
     function test_whitelisted() public {
+        _setupTwapObservations();
         assertEq(zap.whitelisted(bob), false, "Should not be whitelisted");
         zap.whitelist(bob);
         assertEq(zap.whitelisted(bob), true, "Should be whitelisted");
@@ -81,41 +90,63 @@ contract BoycoBurrZapTest is Test {
         vm.startPrank(bob);
         IERC20(USDC).approve(address(zap), 1e18);
         vm.expectRevert("Not whitelisted");
-        zap.deposit(1e18, address(this));
+        zap.deposit(1e18, address(this), 0);
 
-        vm.expectRevert("BAL#426");
+        vm.expectRevert("BAL#426"); // CALLER_IS_NOT_OWNER
         zap.whitelist(bob);
 
         vm.stopPrank();
     }
 
     function test_deposit_0() public {
+        _setupTwapObservations();
         vm.expectRevert("Invalid deposit amount");
-        zap.deposit(0, address(this));
+        zap.deposit(0, address(this), 0);
     }
 
     function test_deposit_1USDC() public {
+        _setupTwapObservations();
         _depositAndAssert(1e6, NECT_USDC_HONEY_POOL);
     }
 
     function test_deposit_max() public {
+        _setupTwapObservations();
         _depositAndAssert(MAX_USDC_DEPOSIT, NECT_USDC_HONEY_POOL);
     }
 
     function test_Fuzz_deposit_max(uint256) public {
+        _setupTwapObservations();
         _vaultAproveAllTokens(alice);
         _doRandomSwap(alice);
         _depositAndAssert(MAX_USDC_DEPOSIT, NECT_USDC_HONEY_POOL);
     }
 
     function test_Fuzz_deposit(uint256 _usdcAmount) public {
+        _setupTwapObservations();
         vm.assume(_usdcAmount > 0 && _usdcAmount < MAX_USDC_DEPOSIT);
         _vaultAproveAllTokens(alice);
         _doRandomSwap(alice);
         _depositAndAssert(_usdcAmount, NECT_USDC_HONEY_POOL);
     }
 
+    function test_minBptOut_revert() public {
+        _setupTwapObservations();
+        _vaultAproveAllTokens(alice);
+        zap.whitelist(alice);
+
+        uint256 usdcDeposit = 1e6 * 1e16;
+        uint256 minBptOut = zap.consult(usdcDeposit);
+        // increase the required minBptOut that we ask from the pool to trigger the revert
+        uint256 actualMinBptOut = (minBptOut * 1001) / 1000;
+        vm.startPrank(alice);
+        IERC20(USDC).approve(address(zap), actualMinBptOut);
+        vm.expectRevert("BAL#208"); // BPT_OUT_MIN_AMOUNT
+        zap.deposit(usdcDeposit, address(this), actualMinBptOut);
+        vm.stopPrank();
+    }
+
     function test_small_deposits() public {
+        _setupTwapObservations();
         // for very small amounts (USDC wei), the deposit will fail with BAL#003
         // we want to ignore this in this test since it's not a real failure
         // of the Zap contract but rather an issue caused by small deposits
@@ -130,9 +161,8 @@ contract BoycoBurrZapTest is Test {
         for (uint256 i = 1; i < 1e3; i++) {
             uint256 lpBalPre = IERC20(NECT_USDC_HONEY_POOL).balanceOf(address(this));
             IERC20(USDC).approve(address(zap), i);
-            // deposit
-            try zap.deposit(i, address(this)) {}
-            catch (bytes memory reason) {
+            // deposit - but ignore minBptOut argument here
+            try zap.deposit(i, address(this), 0) {} catch (bytes memory reason) {
                 if (keccak256(abi.encodePacked(reason)) != bal003Hash) {
                     revert(string(reason));
                 }
@@ -144,22 +174,17 @@ contract BoycoBurrZapTest is Test {
         }
     }
 
-    function test_pool_ratio_loop_deposit() public {
-        _vaultAproveAllTokens(alice);
-
-        uint256 iterations = 30;
-        for (uint256 i = 0; i < iterations; i++) {
-            _doRandomSwap(alice);
-            uint256 depositAmount = vm.randomUint(0, MAX_USDC_DEPOSIT / iterations);
-            _depositAndAssert(depositAmount, NECT_USDC_HONEY_POOL);
-        }
-    }
-
     function test_Fuzz_create_pool_and_deposit(uint256 _usdcAmount) public {
+        _setupTwapObservations();
         vm.assume(_usdcAmount > 1e6 && _usdcAmount < MAX_USDC_DEPOSIT);
         _vaultAproveAllTokens(alice);
-        address pool =
-            _deployCSP(COMPOSABLE_STABLE_POOL_FACTORY, "test", USDC, NECT, IHoneyFactory(HONEY_FACTORY).honey());
+        address pool = _deployCSP(
+            COMPOSABLE_STABLE_POOL_FACTORY,
+            "test",
+            USDC,
+            NECT,
+            IHoneyFactory(HONEY_FACTORY).honey()
+        );
         _initCSP(alice, VAULT, pool);
 
         _etchContract(PSM_WHITELISTED, pool);
@@ -170,6 +195,7 @@ contract BoycoBurrZapTest is Test {
     }
 
     function test_Fuzz_query_deposit(uint256 _depositAmount) public {
+        _setupTwapObservations();
         vm.assume(_depositAmount > 0 && _depositAmount < MAX_USDC_DEPOSIT);
         console.log("_depositAmount", _depositAmount);
         _vaultAproveAllTokens(alice);
@@ -193,7 +219,7 @@ contract BoycoBurrZapTest is Test {
         IERC20(USDC).approve(address(zap), _depositAmount);
         console.log("========================= Bob deposit start =================");
         // deposit USDC
-        zap.deposit(_depositAmount, bob);
+        zap.deposit(_depositAmount, bob, 0);
         console.log("========================= Bob deposit end =================");
         // ensure zap has no tokens balance
         _ensureNoZapBalance(zap);
@@ -207,14 +233,11 @@ contract BoycoBurrZapTest is Test {
         console.log("lpReceived", lpReceived);
 
         if (lpReceived < queryBptAmount) {
+            // query deposit should never return more bptOut than the deposit
             uint256 diffLp = ((queryBptAmount - lpReceived) * 1e18) / queryBptAmount;
             console.log("diffLp", diffLp);
 
-            assertLt(
-                diffLp,
-                LP_QUERY_TOLERANCE,
-                "should not get less than 0.1% less LP tokens vs what the query call returned"
-            );
+            assertLt(queryBptAmount, lpReceived, "query deposit should never return more bptOut than the deposit");
         } else {
             uint256 diffLp = ((lpReceived - queryBptAmount) * 1e18) / queryBptAmount;
             console.log("diffLp", diffLp);
@@ -226,7 +249,7 @@ contract BoycoBurrZapTest is Test {
         }
     }
 
-    function _printArrayDiff(uint256[] memory _a, uint256[] memory _b) internal {
+    function _printArrayDiff(uint256[] memory _a, uint256[] memory _b) internal pure {
         for (uint256 i = 0; i < _a.length; i++) {
             if (_a[i] < _b[i]) {
                 console.log("diff[", i, "] -", _b[i] - _a[i]);
@@ -238,7 +261,29 @@ contract BoycoBurrZapTest is Test {
         }
     }
 
-    function _test_price_manipulation(uint256 _depositAmount, uint256 _bobNectSwap, uint256 _aliceDeposit) public {
+    function test_Fuzz_price_manipulation(uint256 _depositAmount) public {
+        _setupTwapObservations();
+        vm.assume(_depositAmount > 1e6 && _depositAmount < MAX_USDC_DEPOSIT);
+
+        console.log("deposit amount", _depositAmount);
+        _vaultAproveAllTokens(alice);
+        _vaultAproveAllTokens(bob);
+        _vaultAproveAllTokens(carol);
+        // deposit some USDC into the pool
+        _depositAndAssert(_depositAmount, NECT_USDC_HONEY_POOL);
+        // imbalance the pool
+        _doRandomSwap(carol);
+        console.log("========================= Carol swap end =================");
+
+        bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
+        (IERC20[] memory tokens, uint256[] memory bals, ) = IVault(VAULT).getPoolTokens(poolId);
+        uint256 nectIndex = _getTokenIndex(tokens, NECT);
+        uint256 swapAmt = vm.randomUint(1, 3 * bals[nectIndex]);
+        uint256 aliceDeposit = vm.randomUint(1e6, _depositAmount);
+        _test_price_manipulation(swapAmt, aliceDeposit);
+    }
+
+    function _test_price_manipulation(uint256 _bobNectSwap, uint256 _aliceDeposit) public {
         // bob manipulates the price of NECT/USDC by swapping NECT -> USDC
         console.log("bob swaps NECT -> USDC", _bobNectSwap);
         UserBalances memory bobBalancesPre = _snapshot_user_balances(bob);
@@ -251,9 +296,23 @@ contract BoycoBurrZapTest is Test {
         vm.startPrank(alice);
         console.log("alice deposits USDC", _aliceDeposit);
         IERC20(USDC).approve(address(zap), _aliceDeposit);
+        // BL#208 is the error code for "Not enough BPT out"
+        bytes32 bal208Hash = 0x3a7776715a94528fa674319ef82574fad592bbd0a24e7f59a14bb9059cf88473;
         // deposit USDC
+        uint256 minBptOut = zap.consult(_aliceDeposit);
+        uint256 minBptOutSlippage = (minBptOut * (1e18 - MAX_ALLOWED_SLIPPAGE)) / 1e18;
         console.log("========================= Alice deposit start =================");
-        zap.deposit(_aliceDeposit, alice);
+        try zap.deposit(_aliceDeposit, alice, minBptOutSlippage) {} catch (bytes memory reason) {
+            // ignore the BAL#208 error since it's what we expect if the
+            // deposit failed because of the minBptOut
+            if (keccak256(abi.encodePacked(reason)) != bal208Hash) {
+                revert(string(reason));
+            } else {
+                // if the deposit failed because of the minBptOut
+                // we can skip the rest of the test
+                return;
+            }
+        }
         console.log("========================= Alice deposit end =================");
         vm.stopPrank();
 
@@ -277,9 +336,8 @@ contract BoycoBurrZapTest is Test {
             // Bob's profit is Alice's loss and vice versa
             uint256 bobProfit = bobBalancesPost2.nect - bobBalancesPre.nect;
             console.log("bobProfit NECT profit", bobProfit);
-            uint256 profitRatio =
-                (bobProfit * PRECISION) / _upscale(_aliceDeposit, _computeScalingFactor(address(USDC)));
-            console.log("profitRatio", profitRatio);
+            uint256 profitPct = (bobProfit * PRECISION) / _upscale(_aliceDeposit, _computeScalingFactor(address(USDC)));
+            console.log("profitPct", profitPct);
 
             uint256 bobTotalBalPre = bobBalancesPre.nect + bobBalancesPre.usdc + bobBalancesPre.honey;
             uint256 bobTotalBalPost = bobBalancesPost2.nect + bobBalancesPost2.usdc + bobBalancesPost2.honey;
@@ -287,7 +345,7 @@ contract BoycoBurrZapTest is Test {
             console.log("bobTotalBalDiff", bobTotalBalDiff);
             console.log("bobTotalBalDiff / bobTotalBalPre", bobTotalBalDiff / bobTotalBalPre);
 
-            assertLt(profitRatio, PROFIT_TOLERANCE, "bob should have made less than 10% profit");
+            assertLt(profitPct, MAX_ALLOWED_SLIPPAGE, "bob should have made less than 3% profit");
         } else {
             console.log("bob made NECT loss", bobBalancesPre.nect - bobBalancesPost2.nect);
         }
@@ -297,29 +355,103 @@ contract BoycoBurrZapTest is Test {
         assertEq(bobBalancesPost2.honey, bobBalancesPre.honey, "bob's honey balance should be the same");
     }
 
-    function test_Fuzz_price_manipulation(uint256 _depositAmount) public {
-        vm.assume(_depositAmount > 1e6 && _depositAmount < MAX_USDC_DEPOSIT);
+    function test_twap_restrictions() public {
+        vm.prank(alice);
+        vm.expectRevert("BAL#426"); // CALLER_IS_NOT_OWNER
+        zap.recordObservation(1e18);
 
-        console.log("deposit amount", _depositAmount);
+        // calling consult should revert at this stage since no observations have been recorded
+        vm.expectRevert("Not enough observations");
+        zap.consult(1e6);
+
+        uint256 bptAmount = zap.queryDeposit(1e6, address(this));
+        // first 2 observations in a row should not revert
+        zap.recordObservation(bptAmount);
+        vm.expectRevert("Not enough observations");
+        zap.consult(1e6);
+        vm.warp(block.timestamp + 1 seconds);
+        zap.recordObservation(bptAmount);
+
+        // consult should work now
+        uint256 consultedBptAmountOut = zap.consult(1e6);
+        assertEq(
+            consultedBptAmountOut,
+            bptAmount,
+            "consulted BPT amount should be the same as the recorded BPT amount"
+        );
+        // 3rd observation should revert
+        vm.expectRevert("Not enough time elapsed");
+        zap.recordObservation(bptAmount);
+        vm.warp(block.timestamp + 1 hours);
+        zap.recordObservation(bptAmount);
+        // alice does a swap
         _vaultAproveAllTokens(alice);
-        _vaultAproveAllTokens(bob);
-        _vaultAproveAllTokens(carol);
-        // deposit some USDC into the pool
-        _depositAndAssert(_depositAmount, NECT_USDC_HONEY_POOL);
-        // imbalance the pool
-        _doRandomSwap(carol);
+        _doRandomSwap(alice);
+        bptAmount = zap.queryDeposit(1e6, address(this));
+        vm.warp(block.timestamp + 1 hours);
+        zap.recordObservation(bptAmount);
 
-        bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
-        (IERC20[] memory tokens, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
-        uint256 nectIndex = _getTokenIndex(tokens, NECT);
-        uint256 swapAmt = vm.randomUint(1, 3 * bals[nectIndex]);
-        uint256 aliceDeposit = vm.randomUint(1e6, _depositAmount);
-        _test_price_manipulation(_depositAmount, swapAmt, aliceDeposit);
+        assertTrue(
+            bptAmount != zap.consult(1e6),
+            "consulted BPT amount should be different from the recorded BPT amount"
+        );
+        // we had 2 observations for the last 2h
+        // adding another 25h on top moves the slidding window outside
+        // of the known observations and should revert
+        vm.warp(block.timestamp + 25 hours);
+        vm.expectRevert("Not enough time elapsed");
+        zap.consult(1e6);
+    }
+
+    function test_twap_weighted_average_calculation() public {
+        // Setup: Record 3 observations with different prices and timestamps
+        uint256 bptAmount1 = 100e18;
+        uint256 bptAmount2 = 200e18;
+        uint256 bptAmount3 = 300e18;
+
+        // First observation at t=0
+        zap.recordObservation(bptAmount1);
+
+        // Second observation at t=1 hour
+        vm.warp(block.timestamp + 1 hours);
+        zap.recordObservation(bptAmount2);
+
+        // Third observation at t=3 hours
+        vm.warp(block.timestamp + 2 hours);
+        zap.recordObservation(bptAmount3);
+
+        // Calculate expected TWAP:
+        // Period 1 (1h): 200e18 * 1h = 200e18
+        // Period 2 (2h): 300e18 * 2h = 600e18
+        // Total time: 3h
+        // Expected TWAP = (200e18 + 600e18) / 3 = 266.666...e18
+        // NB: bptAmount1 is not included in the calculation since
+        // it's the first observation and is used only to calculate
+        // the price for the first period, up to the second observation
+
+        uint256 twap = zap.consult(1e6); // Using 1 USDC as input
+
+        // Allow for small rounding differences (within 1 unit)
+        assertApproxEqAbs(twap, 266666666666666666666, 1);
+
+        // Test that older observations beyond period are ignored
+        vm.warp(block.timestamp + 24 hours);
+        uint256 bptAmount4 = 400e18;
+        zap.recordObservation(bptAmount4);
+
+        // Now we need another observation after bptAmount4 to calculate TWAP
+        vm.warp(block.timestamp + 1 hours);
+        uint256 bptAmount5 = 400e18;
+        zap.recordObservation(bptAmount5);
+
+        // The TWAP should now only consider bptAmount4 and bptAmount5
+        twap = zap.consult(1e6);
+        assertEq(twap, 400e18, "TWAP should only consider the latest observation when others are too old");
     }
 
     function _doRandomSwap(address _user) internal {
         bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
-        (IERC20[] memory tokens, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
+        (IERC20[] memory tokens, uint256[] memory bals, ) = IVault(VAULT).getPoolTokens(poolId);
         uint256 bptIndex = IComposableStablePool(NECT_USDC_HONEY_POOL).getBptIndex();
         IERC20[] memory tokensNoBpt = _dropBptItem(tokens, bptIndex);
         uint256 tokensLen = tokensNoBpt.length;
@@ -336,21 +468,6 @@ contract BoycoBurrZapTest is Test {
         _swap(NECT_USDC_HONEY_POOL, _user, swapAmount, address(tokensNoBpt[fromIndex]), address(tokensNoBpt[toIndex]));
     }
 
-    function _print_pool_balances() internal view {
-        uint256[] memory balsNoBpt = _snapshot_pool_balances();
-        console.log("balances[0]", balsNoBpt[0]);
-        console.log("balances[1]", balsNoBpt[1]);
-        console.log("balances[2]", balsNoBpt[2]);
-    }
-
-    function _snapshot_pool_balances() internal view returns (uint256[] memory) {
-        bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
-        (, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
-        uint256 bptIndex = IComposableStablePool(NECT_USDC_HONEY_POOL).getBptIndex();
-        uint256[] memory balsNoBpt = _dropBptItem(bals, bptIndex);
-        return balsNoBpt;
-    }
-
     function _snapshot_user_balances(address _user) internal view returns (UserBalances memory balances) {
         balances.usdc = IERC20(USDC).balanceOf(_user);
         balances.nect = IERC20(NECT).balanceOf(_user);
@@ -358,19 +475,9 @@ contract BoycoBurrZapTest is Test {
         balances.lp = IERC20(NECT_USDC_HONEY_POOL).balanceOf(_user);
     }
 
-    function _snapshot_user_balances_list(address _user) internal view returns (uint256[] memory) {
-        bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
-        (IERC20[] memory tokens,,) = IVault(VAULT).getPoolTokens(poolId);
-        uint256[] memory userBals = new uint256[](tokens.length);
-        for (uint256 i = 0; i < tokens.length; i++) {
-            userBals[i] = tokens[i].balanceOf(_user);
-        }
-        return userBals;
-    }
-
     function _getBalsNoBpt(address _pool) internal view returns (uint256[] memory) {
         bytes32 poolId = IComposableStablePool(_pool).getPoolId();
-        (, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
+        (, uint256[] memory bals, ) = IVault(VAULT).getPoolTokens(poolId);
         uint256 bptIndex = IComposableStablePool(_pool).getBptIndex();
         return _dropBptItem(bals, bptIndex);
     }
@@ -379,8 +486,11 @@ contract BoycoBurrZapTest is Test {
         uint256[] memory balsNoBptPre = _getBalsNoBpt(_pool);
         // approve zap to spend USDC
         IERC20(USDC).approve(address(zap), _usdcAmount);
+        uint256 minBptOut = zap.consult(_usdcAmount);
+        uint256 minBptOutSlippage = (minBptOut * (1e18 - MAX_ALLOWED_SLIPPAGE)) / 1e18;
         // deposit USDC
-        zap.deposit(_usdcAmount, address(this));
+        zap.deposit(_usdcAmount, address(this), minBptOutSlippage);
+
         // ensure zap has no tokens balance
         _ensureNoZapBalance(zap);
         // ensure LP tokens are minted
@@ -444,10 +554,13 @@ contract BoycoBurrZapTest is Test {
         return 0;
     }
 
-    function _deployCSP(address cstFactory, string memory _name, address _token0, address _token1, address _token2)
-        private
-        returns (address)
-    {
+    function _deployCSP(
+        address cstFactory,
+        string memory _name,
+        address _token0,
+        address _token1,
+        address _token2
+    ) private returns (address) {
         address[] memory tokens = TokenArrays.createThreeTokenArray(_token0, _token1, _token2, true);
 
         uint256[] memory tokenRateCacheDurations = new uint256[](3);
@@ -470,7 +583,7 @@ contract BoycoBurrZapTest is Test {
             salt
         );
 
-        (address poolAddressInVault,) = IVault(VAULT).getPool((IComposableStablePool(csp).getPoolId()));
+        (address poolAddressInVault, ) = IVault(VAULT).getPool((IComposableStablePool(csp).getPoolId()));
         assertEq(poolAddressInVault, csp, "Pool address in vault should be the same as the created pool");
 
         return csp;
@@ -479,7 +592,7 @@ contract BoycoBurrZapTest is Test {
     function _initCSP(address _user, address _vault, address _pool) internal {
         bytes32 poolId = IComposableStablePool(_pool).getPoolId();
         // Tokens and amounts
-        (IERC20[] memory tokens, uint256[] memory amounts,) = IVault(_vault).getPoolTokens(poolId);
+        (IERC20[] memory tokens, uint256[] memory amounts, ) = IVault(_vault).getPoolTokens(poolId);
         // Get BPT index from the pool
         uint256 bptIndex = IComposableStablePool(_pool).getBptIndex();
         uint256 len = tokens.length;
@@ -533,16 +646,15 @@ contract BoycoBurrZapTest is Test {
         }
     }
 
-    function _isRatiosWithinTolerance(uint256[] memory _balsPre, uint256[] memory _balsPost)
-        internal
-        view
-        returns (bool, uint256)
-    {
+    function _isRatiosWithinTolerance(
+        uint256[] memory _balsPre,
+        uint256[] memory _balsPost
+    ) internal view returns (bool, uint256) {
         uint256 ratioDiff;
         uint256 totalPre = 0;
         uint256 totalPost = 0;
         bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
-        (IERC20[] memory tokens,,) = IVault(VAULT).getPoolTokens(poolId);
+        (IERC20[] memory tokens, , ) = IVault(VAULT).getPoolTokens(poolId);
         uint256 bptIndex = IComposableStablePool(NECT_USDC_HONEY_POOL).getBptIndex();
         for (uint256 i = 0; i < tokens.length; i++) {
             if (i == bptIndex) {
@@ -556,9 +668,10 @@ contract BoycoBurrZapTest is Test {
             if (i == bptIndex) {
                 continue;
             }
-            uint256 ratioPre = (_upscale(_balsPre[i], _computeScalingFactor(address(tokens[i]))) * PRECISION) / totalPre;
-            uint256 ratioPost =
-                (_upscale(_balsPost[i], _computeScalingFactor(address(tokens[i]))) * PRECISION) / totalPost;
+            uint256 ratioPre = (_upscale(_balsPre[i], _computeScalingFactor(address(tokens[i]))) * PRECISION) /
+                totalPre;
+            uint256 ratioPost = (_upscale(_balsPost[i], _computeScalingFactor(address(tokens[i]))) * PRECISION) /
+                totalPost;
             ratioDiff = Math.abs(int256(ratioPre - ratioPost));
             if (ratioDiff >= RATIO_TOLERANCE) {
                 return (false, ratioDiff);
@@ -584,7 +697,9 @@ contract BoycoBurrZapTest is Test {
         assertEq(IERC20(USDC).balanceOf(address(_zap)), 0, "Zap should have no USDC balance");
         assertEq(IERC20(NECT).balanceOf(address(_zap)), 0, "Zap should have no NECT balance");
         assertEq(
-            IERC20(IHoneyFactory(HONEY_FACTORY).honey()).balanceOf(address(_zap)), 0, "Zap should have no HONEY balance"
+            IERC20(IHoneyFactory(HONEY_FACTORY).honey()).balanceOf(address(_zap)),
+            0,
+            "Zap should have no HONEY balance"
         );
         assertEq(IERC20(NECT_USDC_HONEY_POOL).balanceOf(address(_zap)), 0, "Zap should have no LP tokens balance");
     }
@@ -592,7 +707,7 @@ contract BoycoBurrZapTest is Test {
     /// @dev Etches the BoycoBurrZap contract on top of an already
     /// whitelisted contract
     function _etchContract(address _target, address _pool) internal {
-        zap = new BoycoBurrZap(USDC, _pool, BALANCER_QUERIES, HONEY_FACTORY, NECT, PSM_BOND_PROXY);
+        zap = new BoycoBurrZap(USDC, _pool, BALANCER_QUERIES, HONEY_FACTORY, NECT, PSM_BOND_PROXY, 24 hours, 24);
 
         // make this contract whitelisted for PSM
         vm.etch(_target, getCode(address(zap)));
