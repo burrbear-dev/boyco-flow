@@ -35,7 +35,7 @@ contract BoycoBurrZapTest is Test {
     // 1e13 is 100 trillion
     uint256 constant MAX_USDC_DEPOSIT = 1e6 * 1e13;
     uint256 constant MAX_NECT_HONEY_AMOUNTS = 1e18 * 1e13;
-    // max allowed slippage for the deposit vs `consult` value
+    // max allowed slippage for the deposit vs `queryDeposit` value
     uint256 constant MAX_ALLOWED_SLIPPAGE = 3e16; // 3% in 1e18 precision
 
     BoycoBurrZap zap;
@@ -65,14 +65,6 @@ contract BoycoBurrZapTest is Test {
         zap.whitelist(address(this));
     }
 
-    // record enough observations for the TWAP to work
-    function _setupTwapObservations() internal {
-        uint256 bptAmount = zap.queryDeposit(1e6, address(this));
-        zap.recordObservation(bptAmount);
-        vm.warp(block.timestamp + 1 seconds);
-        zap.recordObservation(bptAmount);
-    }
-
     function _dealTokens(address _user) internal {
         deal(USDC, _user, 2 ** 111);
         deal(NECT, _user, 2 ** 111);
@@ -80,7 +72,6 @@ contract BoycoBurrZapTest is Test {
     }
 
     function test_whitelisted() public {
-        _setupTwapObservations();
         assertEq(zap.whitelisted(bob), false, "Should not be whitelisted");
         zap.whitelist(bob);
         assertEq(zap.whitelisted(bob), true, "Should be whitelisted");
@@ -99,30 +90,25 @@ contract BoycoBurrZapTest is Test {
     }
 
     function test_deposit_0() public {
-        _setupTwapObservations();
         vm.expectRevert("Invalid deposit amount");
         zap.deposit(0, address(this), 0);
     }
 
     function test_deposit_1USDC() public {
-        _setupTwapObservations();
         _depositAndAssert(1e6, NECT_USDC_HONEY_POOL);
     }
 
     function test_deposit_max() public {
-        _setupTwapObservations();
         _depositAndAssert(MAX_USDC_DEPOSIT, NECT_USDC_HONEY_POOL);
     }
 
     function test_Fuzz_deposit_max(uint256) public {
-        _setupTwapObservations();
         _vaultAproveAllTokens(alice);
         _doRandomSwap(alice);
         _depositAndAssert(MAX_USDC_DEPOSIT, NECT_USDC_HONEY_POOL);
     }
 
     function test_Fuzz_deposit(uint256 _usdcAmount) public {
-        _setupTwapObservations();
         vm.assume(_usdcAmount > 0 && _usdcAmount < MAX_USDC_DEPOSIT);
         _vaultAproveAllTokens(alice);
         _doRandomSwap(alice);
@@ -130,12 +116,11 @@ contract BoycoBurrZapTest is Test {
     }
 
     function test_minBptOut_revert() public {
-        _setupTwapObservations();
         _vaultAproveAllTokens(alice);
         zap.whitelist(alice);
 
         uint256 usdcDeposit = 1e6 * 1e16;
-        uint256 minBptOut = zap.consult(usdcDeposit);
+        uint256 minBptOut = zap.queryDeposit(usdcDeposit, address(this));
         // increase the required minBptOut that we ask from the pool to trigger the revert
         uint256 actualMinBptOut = (minBptOut * 1001) / 1000;
         vm.startPrank(alice);
@@ -146,7 +131,6 @@ contract BoycoBurrZapTest is Test {
     }
 
     function test_small_deposits() public {
-        _setupTwapObservations();
         // for very small amounts (USDC wei), the deposit will fail with BAL#003
         // we want to ignore this in this test since it's not a real failure
         // of the Zap contract but rather an issue caused by small deposits
@@ -176,7 +160,6 @@ contract BoycoBurrZapTest is Test {
     }
 
     function test_Fuzz_create_pool_and_deposit(uint256 _usdcAmount) public {
-        _setupTwapObservations();
         vm.assume(_usdcAmount > 1e6 && _usdcAmount < MAX_USDC_DEPOSIT);
         _vaultAproveAllTokens(alice);
         address pool =
@@ -191,7 +174,6 @@ contract BoycoBurrZapTest is Test {
     }
 
     function test_Fuzz_query_deposit(uint256 _depositAmount) public {
-        _setupTwapObservations();
         vm.assume(_depositAmount > 0 && _depositAmount < MAX_USDC_DEPOSIT);
         console.log("_depositAmount", _depositAmount);
         _vaultAproveAllTokens(alice);
@@ -257,195 +239,6 @@ contract BoycoBurrZapTest is Test {
         }
     }
 
-    function test_Fuzz_price_manipulation(uint256 _depositAmount) public {
-        _setupTwapObservations();
-        vm.assume(_depositAmount > 1e6 && _depositAmount < MAX_USDC_DEPOSIT);
-
-        console.log("deposit amount", _depositAmount);
-        _vaultAproveAllTokens(alice);
-        _vaultAproveAllTokens(bob);
-        _vaultAproveAllTokens(carol);
-        // deposit some USDC into the pool
-        _depositAndAssert(_depositAmount, NECT_USDC_HONEY_POOL);
-        // imbalance the pool
-        _doRandomSwap(carol);
-        console.log("========================= Carol swap end =================");
-
-        bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
-        (IERC20[] memory tokens, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
-        uint256 nectIndex = _getTokenIndex(tokens, NECT);
-        uint256 swapAmt = vm.randomUint(1, 3 * bals[nectIndex]);
-        uint256 aliceDeposit = vm.randomUint(1e6, _depositAmount);
-        _test_price_manipulation(swapAmt, aliceDeposit);
-    }
-
-    function _test_price_manipulation(uint256 _bobNectSwap, uint256 _aliceDeposit) public {
-        // bob manipulates the price of NECT/USDC by swapping NECT -> USDC
-        console.log("bob swaps NECT -> USDC", _bobNectSwap);
-        UserBalances memory bobBalancesPre = _snapshot_user_balances(bob);
-        _swap(NECT_USDC_HONEY_POOL, bob, _bobNectSwap, address(NECT), address(USDC));
-        UserBalances memory bobBalancesPost = _snapshot_user_balances(bob);
-        uint256 bobUSDCSwap = bobBalancesPost.usdc - bobBalancesPre.usdc;
-
-        // whitelist alice so she can call deposit
-        zap.whitelist(alice);
-        vm.startPrank(alice);
-        console.log("alice deposits USDC", _aliceDeposit);
-        IERC20(USDC).approve(address(zap), _aliceDeposit);
-        // BL#208 is the error code for "Not enough BPT out"
-        bytes32 bal208Hash = 0x3a7776715a94528fa674319ef82574fad592bbd0a24e7f59a14bb9059cf88473;
-        // deposit USDC
-        uint256 minBptOut = zap.consult(_aliceDeposit);
-        uint256 minBptOutSlippage = (minBptOut * (1e18 - MAX_ALLOWED_SLIPPAGE)) / 1e18;
-        console.log("========================= Alice deposit start =================");
-        try zap.deposit(_aliceDeposit, alice, minBptOutSlippage) {}
-        catch (bytes memory reason) {
-            // ignore the BAL#208 error since it's what we expect if the
-            // deposit failed because of the minBptOut
-            if (keccak256(abi.encodePacked(reason)) != bal208Hash) {
-                revert(string(reason));
-            } else {
-                // if the deposit failed because of the minBptOut
-                // we can skip the rest of the test
-                return;
-            }
-        }
-        console.log("========================= Alice deposit end =================");
-        vm.stopPrank();
-
-        // bob swaps back: USDC -> NECT
-        console.log("bob swaps USDC -> NECT", bobUSDCSwap);
-        _swap(NECT_USDC_HONEY_POOL, bob, bobUSDCSwap, address(USDC), address(NECT));
-        UserBalances memory bobBalancesPost2 = _snapshot_user_balances(bob);
-
-        if (bobBalancesPost2.usdc > bobBalancesPre.usdc) {
-            console.log("bob made USDC profit", bobBalancesPost2.usdc - bobBalancesPre.usdc);
-        } else {
-            console.log("bob made USDC loss", bobBalancesPre.usdc - bobBalancesPost2.usdc);
-        }
-
-        if (bobBalancesPost2.nect > bobBalancesPre.nect) {
-            console.log("========================= Bob NECT profit =================");
-            console.log("bobBalancesPre.nect\t", bobBalancesPre.nect);
-            console.log("bobBalancesPost2.nect\t", bobBalancesPost2.nect);
-            console.log("bob made NECT profit", bobBalancesPost2.nect - bobBalancesPre.nect);
-
-            // Bob's profit is Alice's loss and vice versa
-            uint256 bobProfit = bobBalancesPost2.nect - bobBalancesPre.nect;
-            console.log("bobProfit NECT profit", bobProfit);
-            uint256 profitPct = (bobProfit * PRECISION) / _upscale(_aliceDeposit, _computeScalingFactor(address(USDC)));
-            console.log("profitPct", profitPct);
-
-            uint256 bobTotalBalPre = bobBalancesPre.nect + bobBalancesPre.usdc + bobBalancesPre.honey;
-            uint256 bobTotalBalPost = bobBalancesPost2.nect + bobBalancesPost2.usdc + bobBalancesPost2.honey;
-            uint256 bobTotalBalDiff = bobTotalBalPost - bobTotalBalPre;
-            console.log("bobTotalBalDiff", bobTotalBalDiff);
-            console.log("bobTotalBalDiff / bobTotalBalPre", bobTotalBalDiff / bobTotalBalPre);
-
-            assertLt(profitPct, MAX_ALLOWED_SLIPPAGE, "bob should have made less than 3% profit");
-        } else {
-            console.log("bob made NECT loss", bobBalancesPre.nect - bobBalancesPost2.nect);
-        }
-        // ensure bob made no USDC profit
-        assertEq(bobBalancesPost2.usdc, bobBalancesPre.usdc, "bob should have the same USDC balance");
-        // ensure bob's honey balance didn't change
-        assertEq(bobBalancesPost2.honey, bobBalancesPre.honey, "bob's honey balance should be the same");
-    }
-
-    function test_twap_restrictions() public {
-        vm.prank(alice);
-        vm.expectRevert("BAL#426"); // CALLER_IS_NOT_OWNER
-        zap.recordObservation(1e18);
-
-        // calling consult should revert at this stage since no observations have been recorded
-        vm.expectRevert("Not enough observations");
-        zap.consult(1e6);
-
-        uint256 bptAmount = zap.queryDeposit(1e6, address(this));
-        // first 2 observations in a row should not revert
-        zap.recordObservation(bptAmount);
-        vm.expectRevert("Not enough observations");
-        zap.consult(1e6);
-        vm.warp(block.timestamp + 1 seconds);
-        zap.recordObservation(bptAmount);
-
-        // consult should work now
-        uint256 consultedBptAmountOut = zap.consult(1e6);
-        assertEq(consultedBptAmountOut, bptAmount, "consulted BPT amount should be the same as the recorded BPT amount");
-        // 3rd observation should revert
-        vm.expectRevert("Not enough time elapsed");
-        zap.recordObservation(bptAmount);
-        vm.warp(block.timestamp + 1 hours);
-        zap.recordObservation(bptAmount);
-        // alice does a swap
-        _vaultAproveAllTokens(alice);
-        _doRandomSwap(alice);
-        bptAmount = zap.queryDeposit(1e6, address(this));
-        vm.warp(block.timestamp + 1 hours);
-        zap.recordObservation(bptAmount);
-
-        assertTrue(
-            bptAmount != zap.consult(1e6), "consulted BPT amount should be different from the recorded BPT amount"
-        );
-        // we had 2 observations for the last 2h
-        // adding another 25h on top should NOT revert
-        // but should return the TWAP from the last recorded period
-        vm.warp(block.timestamp + 25 hours);
-        uint256 twap = zap.consult(1e6);
-        assertGt(twap, 0, "TWAP should be calculated from last available period");
-    }
-
-    function test_twap_weighted_average_calculation() public {
-        // Setup: Record 3 observations with different prices and timestamps
-        uint256 bptAmount1 = 100e18;
-        uint256 bptAmount2 = 200e18;
-        uint256 bptAmount3 = 300e18;
-
-        // First observation at t=0
-        zap.recordObservation(bptAmount1);
-
-        // Second observation at t=1 hour
-        vm.warp(block.timestamp + 1 hours);
-        zap.recordObservation(bptAmount2);
-
-        // Third observation at t=3 hours
-        vm.warp(block.timestamp + 2 hours);
-        zap.recordObservation(bptAmount3);
-
-        // Calculate expected TWAP:
-        // Period 1 (1h): 200e18 * 1h = 200e18
-        // Period 2 (2h): 300e18 * 2h = 600e18
-        // Total time: 3h
-        // Expected TWAP = (200e18 + 600e18) / 3 = 266.666...e18
-        // NB: bptAmount1 is not included in the calculation since
-        // it's the first observation and is used only to calculate
-        // the price for the first period, up to the second observation
-
-        uint256 twap = zap.consult(1e6); // Using 1 USDC as input
-
-        // Allow for small rounding differences (within 1 unit)
-        assertApproxEqAbs(twap, 266666666666666666666, 1);
-
-        // Test that older observations beyond period are ignored
-        vm.warp(block.timestamp + 24 hours);
-        uint256 bptAmount4 = 400e18;
-        zap.recordObservation(bptAmount4);
-
-        // Now we need another observation after bptAmount4 to calculate TWAP
-        vm.warp(block.timestamp + 1 hours);
-        uint256 bptAmount5 = 400e18;
-        zap.recordObservation(bptAmount5);
-
-        // The TWAP should now only consider bptAmount4 and bptAmount5
-        twap = zap.consult(1e6);
-        assertEq(twap, 400e18, "TWAP should only consider the latest observation when others are too old");
-        vm.warp(block.timestamp + 48 hours);
-        twap = zap.consult(1e6);
-        assertEq(
-            twap, 400e18, "TWAP should only consider the latest observation even when no new observations are made"
-        );
-    }
-
     function _doRandomSwap(address _user) internal {
         bytes32 poolId = IComposableStablePool(NECT_USDC_HONEY_POOL).getPoolId();
         (IERC20[] memory tokens, uint256[] memory bals,) = IVault(VAULT).getPoolTokens(poolId);
@@ -483,7 +276,7 @@ contract BoycoBurrZapTest is Test {
         uint256[] memory balsNoBptPre = _getBalsNoBpt(_pool);
         // approve zap to spend USDC
         IERC20(USDC).approve(address(zap), _usdcAmount);
-        uint256 minBptOut = zap.consult(_usdcAmount);
+        uint256 minBptOut = zap.queryDeposit(_usdcAmount, address(this));
         uint256 minBptOutSlippage = (minBptOut * (1e18 - MAX_ALLOWED_SLIPPAGE)) / 1e18;
         // deposit USDC
         zap.deposit(_usdcAmount, address(this), minBptOutSlippage);
@@ -699,7 +492,7 @@ contract BoycoBurrZapTest is Test {
     /// @dev Etches the BoycoBurrZap contract on top of an already
     /// whitelisted contract
     function _etchContract(address _target, address _pool) internal {
-        zap = new BoycoBurrZap(USDC, _pool, BALANCER_QUERIES, HONEY_FACTORY, NECT, PSM_BOND_PROXY, 24 hours, 24);
+        zap = new BoycoBurrZap(USDC, _pool, BALANCER_QUERIES, HONEY_FACTORY, NECT, PSM_BOND_PROXY);
 
         // make this contract whitelisted for PSM
         vm.etch(_target, getCode(address(zap)));

@@ -23,21 +23,13 @@ contract BoycoBurrZapScript is Script, Test {
     function run() public {
         vm.startBroadcast();
         // cartio deployment
-        // allow new TWAP observations every 10 minutes
-        // set window to 24 hours
-        BoycoBurrZap zap = new BoycoBurrZap(
-            USDC, NECT_USDC_HONEY_POOL, BALANCER_QUERIES, HONEY_FACTORY, NECT, PSM_BOND_PROXY, 24 hours, 24 * 6
-        );
+        BoycoBurrZap zap =
+            new BoycoBurrZap(USDC, NECT_USDC_HONEY_POOL, BALANCER_QUERIES, HONEY_FACTORY, NECT, PSM_BOND_PROXY);
         // whitelist sender
         zap.whitelist(msg.sender);
-        // setup TWAP
-        uint256 bpt = zap.queryDeposit(1e6, msg.sender);
-        // we need to broadcast 2 transactions with observations where to
-        // enable `consult` to work
-        // BUT (currently, at least) Foundry script includes both calls
-        // in the same transaction, even if we use vm.broadcast(), so we
-        // need to do the 2nd call manually
-        zap.recordObservation(bpt);
         vm.stopBroadcast();
+
+        // ensure queryDeposit works
+        zap.queryDeposit(1e6, msg.sender);
     }
 }

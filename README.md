@@ -10,12 +10,6 @@ address burrZap = 0xd39e7aa57CB0703cE74Bc96dA005dFceE2Ac4F56;
 // First approve the exact deposit amount
 IERC20(USDC).approve(burrZap, usdcAmtDeposit);
 
-// Get expected BPT output amount using TWAP price
-uint256 expectedBptOut = IBoycoBurrZap(burrZap).consult(usdcAmtDeposit);
-
-// Apply slippage tolerance (2% in this example)
-uint256 minBptOut = (expectedBptOut * 98) / 100;
-
 // Execute deposit
 IBoycoBurrZap(burrZap).deposit(
     usdcAmtDeposit,    // Amount of USDC to deposit
@@ -23,3 +17,5 @@ IBoycoBurrZap(burrZap).deposit(
     minBptOut         // Minimum BPT tokens to receive (with slippage)
 );
 ```
+
+NB: `minBptOut` should be passed by an offchain source that calls the `queryDeposit` function.

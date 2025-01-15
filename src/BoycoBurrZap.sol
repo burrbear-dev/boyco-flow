@@ -36,18 +36,7 @@ import {IBoycoBurrZap} from "./interfaces/IBoycoBurrZap.sol";
  * - PSM Bond Proxy: Trusted for NECT minting
  * - Token Approvals: Contract approves max amounts to various protocols at deployment
  *
- * @notice Process Flow:
- * 1. Boyco contract calls `IERC20(TOKEN).approve` for the amount of tokens they are depositing
- * 2. Boyco contract calls `consult` with base token amount to receive BPT out amount value
- * 3. Boyco contract calls deposit() with base token amount, recipient address, and slippage tolerance applied to the BPT out amount
- * 4. Contract calculates required proportions based on current pool balances
- * 5. Contract mints required NECT and HONEY using deposited base token
- * 6. Contract executes joinPool operation with exact token amounts
- * 7. LP tokens are sent directly to specified recipient
- *
  * @dev Considerations:
- * - both `consult` and `deposit` use 1e18 decimals for BPT out amounts (consult returns
- *   BPT out amount, deposit uses it as slippage tolerance)
  * - Assumes the ComposableStablePool has already been initialized
  * - Assumes this contract has been whitelisted in the Beraborrow PSM
  * - Assumes Beraborrow's PSM returns 100% of the USDC deposited as NECT (1:1 ratio)
@@ -71,8 +60,6 @@ contract BoycoBurrZap is IBoycoBurrZap, Ownable {
     string private constant ERROR_INVALID_DECIMALS = "Token decimals must be <= 18";
     string private constant ERROR_NOT_WHITELISTED = "Not whitelisted";
     string private constant ERROR_HONEY_NOT_IN_POOL = "HONEY not in pool";
-    string private constant ERROR_NOT_ENOUGH_OBSERVATIONS = "Not enough observations";
-    string private constant ERROR_NOT_ENOUGH_TIME_ELAPSED = "Not enough time elapsed";
     string private constant ERROR_INVALID_BPT_AMOUNT = "Invalid BPT amount";
     string private constant ERROR_INVALID_POOL_TOKENS = "Invalid number of pool tokens";
     string private constant ERROR_TRANSFER_FAILED = "Transfer failed";
@@ -94,42 +81,6 @@ contract BoycoBurrZap is IBoycoBurrZap, Ownable {
     // ---- Whitelist ----
     mapping(address => bool) public whitelisted;
 
-    // ---- TWAP ----
-    /// @notice Configuration parameters for the TWAP functionality
-    /// @dev The period and granularity together determine the TWAP's behavior:
-    /// - Observation frequency = period / granularity
-    /// - Maximum observations stored = granularity
-    /// - Minimum time between updates = period / granularity
-    ///
-    /// @param period The time window in seconds over which the TWAP is calculated
-    /// Examples:
-    /// - 24 hours = 86400
-    /// - 1 week = 604800
-    /// - 1 month (30 days) = 2592000
-    ///
-    /// @param granularity The maximum number of observations to store
-    /// Examples for a 24-hour period:
-    /// - Hourly updates: granularity = 24
-    /// - 30-min updates: granularity = 48
-    /// - 15-min updates: granularity = 96
-    ///
-    /// Gas cost considerations:
-    /// - Higher granularity = more precision but higher gas costs
-    /// - Lower granularity = less precision but lower gas costs
-    /// - Gas cost increases with more frequent updates and stored observations
-    /// @dev Observation struct is 256 bits to fit into a single storage slot
-    struct Observation {
-        uint32 timestamp; // 32 bits
-        uint224 price; // 224 bits
-    }
-    // array of observations to keep in the sliding window
-
-    Observation[] public observations;
-    // total time period to calculate TWAP over (ie. sliding window)
-    uint256 public immutable period;
-    // number of observations to keep in the sliding window
-    uint256 public immutable granularity;
-
     modifier onlyWhitelisted() {
         require(whitelisted[msg.sender], ERROR_NOT_WHITELISTED);
         _;
@@ -145,7 +96,6 @@ contract BoycoBurrZap is IBoycoBurrZap, Ownable {
     event Deposit(address indexed sender, uint256 amount, address indexed recipient);
     event Whitelisted(address indexed whitelisted);
     event Revoked(address indexed revoked);
-    event PriceObservation(uint32 timestamp, uint256 bptAmountOut);
 
     /**
      * @notice Initializes the BoycoBurrZap contract
@@ -161,9 +111,7 @@ contract BoycoBurrZap is IBoycoBurrZap, Ownable {
         address _balancerQueries,
         address _honeyFactory,
         address _nect,
-        address _pBondProxy,
-        uint256 _period,
-        uint256 _granularity
+        address _pBondProxy
     ) Ownable() {
         require(_token != address(0), ERROR_INVALID_CONSTRUCTOR_ARG);
         require(_pool != address(0), ERROR_INVALID_CONSTRUCTOR_ARG);
@@ -171,9 +119,6 @@ contract BoycoBurrZap is IBoycoBurrZap, Ownable {
         require(_honeyFactory != address(0), ERROR_INVALID_CONSTRUCTOR_ARG);
         require(_nect != address(0), ERROR_INVALID_CONSTRUCTOR_ARG);
         require(_pBondProxy != address(0), ERROR_INVALID_CONSTRUCTOR_ARG);
-        require(_period > 0, ERROR_INVALID_CONSTRUCTOR_ARG);
-        // granularity must be greater than 1 to avoid division by zero
-        require(_granularity > 1, ERROR_INVALID_CONSTRUCTOR_ARG);
 
         address _vault = IComposableStablePool(_pool).getVault();
         // ensure the vault is the same as the one in the balancer queries
@@ -203,9 +148,6 @@ contract BoycoBurrZap is IBoycoBurrZap, Ownable {
             else if (address(tokens[i]) == _nect) nectInPool = true;
         }
         require(honeyInPool && tokenInPool && nectInPool, ERROR_TOKEN_NOT_IN_POOL);
-
-        period = _period;
-        granularity = _granularity;
 
         // Set approvals once at deployment
         IERC20(_token).approve(_pBondProxy, type(uint256).max);
@@ -306,88 +248,6 @@ contract BoycoBurrZap is IBoycoBurrZap, Ownable {
     }
 
     /////////////////////////
-    //////// TWAP ///////////
-    /////////////////////////
-    /**
-     * @notice Calculates expected BPT output for a deposit using TWAP
-     * @dev TWAP calculation details:
-     * - Uses observations stored over the configured period (e.g., 24 hours)
-     * - Requires minimum 2 price observations
-     * - Weights prices by time duration between observations
-     * - Returns current TWAP even if no recent observations exist
-     *
-     * Formula:
-     * TWAP = Σ(price_i * duration_i) / Σ(duration_i)
-     * Expected BPT = TWAP * scaled_token_amount / 1e18
-     *
-     * @param _tokenAmount Amount of deposit token to calculate for (in token's native decimals)
-     * @return Expected BPT output amount in 1e18 decimals
-     */
-    function consult(uint256 _tokenAmount) external view override returns (uint256) {
-        require(observations.length >= 2, ERROR_NOT_ENOUGH_OBSERVATIONS);
-
-        uint224 weightedPrice;
-        uint32 timeElapsed;
-
-        // Find the most recent observation
-        uint256 mostRecentIndex = observations.length - 1;
-        uint256 endTime = observations[mostRecentIndex].timestamp;
-
-        // Calculate start time as 24h before the most recent observation
-        uint256 startTime = endTime - period;
-
-        // Iterate backwards through observations to find the first one within our window
-        uint256 i;
-        for (i = mostRecentIndex; i > 0; i--) {
-            Observation memory current = observations[i];
-            Observation memory previous = observations[i - 1];
-
-            // Stop if we've gone past our start time
-            if (previous.timestamp < startTime) {
-                break;
-            }
-
-            uint32 duration = current.timestamp - previous.timestamp;
-            timeElapsed += duration;
-            weightedPrice += current.price * duration;
-        }
-
-        require(timeElapsed > 0, ERROR_NOT_ENOUGH_TIME_ELAPSED);
-        uint256 price = uint256(weightedPrice / timeElapsed);
-
-        return Math.mul(price, _upscale(_tokenAmount, _computeScalingFactor(address(TOKEN)))) / 1e18;
-    }
-
-    /// @notice Records a new observation of token -> BPT price
-    /// permissioned to owner only
-    /// owner should call `queryDeposit` with a value of 1 token (ie. 1e6 if the deposit token is USDC)
-    /// and pass the returned BPT amount to this function
-    function recordObservation(uint256 _bptAmount) external onlyOwner {
-        require(_bptAmount > 0 && _bptAmount < type(uint224).max, ERROR_INVALID_BPT_AMOUNT);
-        require(canRecordObservation(), ERROR_NOT_ENOUGH_TIME_ELAPSED);
-
-        // Store observation
-        observations.push(Observation({timestamp: uint32(block.timestamp), price: uint224(_bptAmount)}));
-
-        // Maintain sliding window
-        if (observations.length > granularity) {
-            assembly {
-                sstore(observations.slot, sub(sload(observations.slot), 1))
-            }
-        }
-
-        emit PriceObservation(uint32(block.timestamp), _bptAmount);
-    }
-
-    function canRecordObservation() public view returns (bool) {
-        // allow the first 2 observations to be recorded without checking the time elapsed
-        if (observations.length < 2) return true;
-
-        uint256 timeElapsed = block.timestamp - observations[observations.length - 1].timestamp;
-        return timeElapsed >= period / granularity;
-    }
-
-    /////////////////////////
     /////// HELPERS /////////
     /////////////////////////
 
@@ -400,7 +260,6 @@ contract BoycoBurrZap is IBoycoBurrZap, Ownable {
      *   * Honey mint rate variations
      *   * Pool state changes between query and actual deposit
      * - Should only be used for off-chain price observations
-     * - For actual deposits, use consult() to get price estimate
      *
      * @param _depositAmount Amount of deposit token to simulate (in token's native decimals)
      * @param _recipient Test address to use for simulation
