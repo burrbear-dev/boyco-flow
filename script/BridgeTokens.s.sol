@@ -8,7 +8,7 @@ import "forge-std/console2.sol";
 import {BurrBoycoFlowExecutor} from "../src/BoycoBurrDepositExecutor.sol";
 
 interface IDepositLocker {
-    function bridgeSingleTokens(uint256 payableAmount, bytes32 marketHash, address[] memory depositors) external;
+    function bridgeSingleTokens(bytes32 marketHash, address[] memory depositors) external payable;
 }
 
 interface IDepositExecutor {
@@ -43,7 +43,7 @@ contract BridgeTokensScript is Script, Test {
         address[] memory depositors = new address[](2);
         depositors[0] = 0x15f05Cd06fa979b311B5282724A9A8f1b4B9532A;
         depositors[1] = 0x235A2ac113014F9dcb8aBA6577F20290832dDEFd;
-        IDepositLocker(DEPOSIT_LOCKER).bridgeSingleTokens(ETH_FOR_GAS, MARKET_HASH, depositors);
+        IDepositLocker(DEPOSIT_LOCKER).bridgeSingleTokens{value: ETH_FOR_GAS}(MARKET_HASH, depositors);
 
         vm.stopBroadcast();
     }
