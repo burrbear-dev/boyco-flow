@@ -1,6 +1,6 @@
 ## BurrBear Boyco Integration Audits
 
-### AKIRATECH December 2024 Audit
+### AkiraTech December 2024 Audit
 
 - [View Audit Report (PDF)](./akiratech-december-2024.pdf)
 - [Audit Repository](https://github.com/akiratechhq/review-burrbear-boyco-2024-12/)
