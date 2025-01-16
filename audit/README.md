@@ -3,7 +3,6 @@
 ### AKIRATECH December 2024 Audit
 
 - [View Audit Report (PDF)](./akiratech-december-2024.pdf)
-- [Download Audit Report (PDF)](./akiratech-december-2024.pdf?raw=true)
 - [Audit Repository](https://github.com/akiratechhq/review-burrbear-boyco-2024-12/)
 
 #### Key Findings Summary
