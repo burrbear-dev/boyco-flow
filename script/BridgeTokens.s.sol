@@ -27,10 +27,10 @@ interface ICCDMSetter {
 contract BridgeTokensScript is Script, Test {
     // --- sepolia addresses ---
     address constant MARKET_OWNER = 0x235A2ac113014F9dcb8aBA6577F20290832dDEFd;
-    address constant DEPOSIT_LOCKER = 0x0bef4676900f89Ce8d31f4255E3F506f32acd4cB;
-    address constant DEPOSIT_EXECUTOR = 0x068B4462E85EdbD4d7e3cbBEA8F42886f5A93822;
-    bytes32 constant MARKET_HASH = 0x14a40bc60f69c582d9e664a2a03765b1dd6182296c42ef7eb2d71eefcd7825c4;
-    uint256 constant ETH_FOR_GAS = 0.5 ether;
+    address constant DEPOSIT_LOCKER = 0x98d2F90150329726C039715Dd90DB84F0D4a0ea6;
+    address constant DEPOSIT_EXECUTOR = 0x17621de23Ff8Ad9AdDd82077B0C13c3472367382;
+    bytes32 constant MARKET_HASH = 0x2ea4064346c43df2dc316fbb9e6ad99baf878c45683d63b88cbd3db9a8e2abdd;
+    uint256 constant ETH_FOR_GAS = 0.3 ether;
     // --- cartio addresses ---
     address constant CCDM_SETTER = 0x67D0B6e109b82B51706dC4D71B42Bf19CdFC8d1e;
     address constant MULTICALL = 0xcA11bde05977b3631167028862bE2a173976CA11;
@@ -48,14 +48,21 @@ contract BridgeTokensScript is Script, Test {
         vm.stopBroadcast();
     }
 
+    ///
+    /// ```sh
+    ///     forge script ./script/BridgeTokens.s.sol --account X_DEPLOYER2 --sig "executeDeposits()" --sender 0x235A2ac113014F9dcb8aBA6577F20290832dDEFd --rpc-url $CARTIO_RPC_URL
+    /// ```
     function executeDeposits() public {
         uint256 ccdmNonce = 13;
-        uint256 minAmount = 14840086782376987889994;
+        uint256 minAmount = 128614085447267723486555;
 
         vm.startBroadcast();
 
         BurrBoycoFlowExecutor executor = new BurrBoycoFlowExecutor();
+        console.log("BurrBoycoFlowExecutor executor created at", address(executor));
+        console.log("Setting new campaign owner");
         IDepositExecutor(DEPOSIT_EXECUTOR).setNewCampaignOwner(MARKET_HASH, address(executor));
+        console.log("Executing deposit recipes");
         executor.executeDepositRecipes(DEPOSIT_EXECUTOR, CCDM_SETTER, ccdmNonce, minAmount, MARKET_HASH);
 
         vm.stopBroadcast();
